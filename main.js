@@ -198,6 +198,40 @@ ipcMain.handle('select-image', async () => {
   return { success: false };
 });
 
+ipcMain.handle('select-images', async () => {
+  const result = await dialog.showOpenDialog(mainWindow, {
+    properties: ['openFile', 'multiSelections'],
+    filters: [
+      { name: 'Images', extensions: ['jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp'] }
+    ]
+  });
+
+  if (!result.canceled && result.filePaths.length > 0) {
+    return { success: true, filePaths: result.filePaths };
+  }
+  return { success: false };
+});
+
+ipcMain.handle('select-folder', async () => {
+  const result = await dialog.showOpenDialog(mainWindow, {
+    properties: ['openDirectory']
+  });
+
+  if (!result.canceled && result.filePaths.length > 0) {
+    return { success: true, folderPath: result.filePaths[0] };
+  }
+  return { success: false };
+});
+
+ipcMain.handle('open-folder', async (event, folderPath) => {
+  try {
+    shell.openPath(folderPath);
+    return { success: true };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
 ipcMain.handle('perform-ocr', async (event, { imagePath, promptType, baseSize, imageSize, cropMode }) => {
   try {
     const FormData = require('form-data');
@@ -228,6 +262,84 @@ ipcMain.handle('perform-ocr', async (event, { imagePath, promptType, baseSize, i
       success: false,
       error: error.response?.data?.message || error.message
     };
+  }
+});
+
+// Queue operations
+ipcMain.handle('add-to-queue', async (event, { filePaths, promptType, baseSize, imageSize, cropMode }) => {
+  try {
+    const FormData = require('form-data');
+    const formData = new FormData();
+
+    // Add all files to form data
+    for (const filePath of filePaths) {
+      const imageBuffer = fs.readFileSync(filePath);
+      formData.append('files', imageBuffer, {
+        filename: path.basename(filePath),
+        contentType: 'image/jpeg'
+      });
+    }
+
+    formData.append('prompt_type', promptType || 'document');
+    formData.append('base_size', baseSize || 1024);
+    formData.append('image_size', imageSize || 640);
+    formData.append('crop_mode', cropMode ? 'true' : 'false');
+
+    const response = await axios.post(`${PYTHON_SERVER_URL}/queue/add`, formData, {
+      headers: formData.getHeaders(),
+      maxContentLength: Infinity,
+      maxBodyLength: Infinity
+    });
+
+    return { success: true, data: response.data };
+  } catch (error) {
+    console.error('Add to queue error:', error);
+    return {
+      success: false,
+      error: error.response?.data?.message || error.message
+    };
+  }
+});
+
+ipcMain.handle('get-queue-status', async () => {
+  try {
+    const response = await axios.get(`${PYTHON_SERVER_URL}/queue/status`);
+    return { success: true, data: response.data };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('process-queue', async () => {
+  try {
+    const response = await axios.post(`${PYTHON_SERVER_URL}/queue/process`, {}, {
+      timeout: 0 // No timeout for queue processing
+    });
+    return { success: true, data: response.data };
+  } catch (error) {
+    console.error('Process queue error:', error);
+    return {
+      success: false,
+      error: error.response?.data?.message || error.message
+    };
+  }
+});
+
+ipcMain.handle('clear-queue', async () => {
+  try {
+    const response = await axios.post(`${PYTHON_SERVER_URL}/queue/clear`);
+    return { success: true, data: response.data };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('remove-from-queue', async (event, itemId) => {
+  try {
+    const response = await axios.delete(`${PYTHON_SERVER_URL}/queue/remove/${itemId}`);
+    return { success: true, data: response.data };
+  } catch (error) {
+    return { success: false, error: error.message };
   }
 });
 

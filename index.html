@@ -115,6 +115,31 @@
         </header>
 
         <main>
+            <!-- Queue Panel -->
+            <div class="queue-panel" id="queue-panel">
+                <div class="queue-header">
+                    <h3>Processing Queue (<span id="queue-count">0</span>)</h3>
+                    <div class="queue-buttons">
+                        <button id="add-files-btn" class="btn btn-small">Add Files</button>
+                        <button id="add-folder-btn" class="btn btn-small">Add Folder</button>
+                        <button id="process-queue-btn" class="btn btn-primary btn-small" disabled>Process Queue</button>
+                        <button id="clear-queue-btn" class="btn btn-small" disabled>Clear Queue</button>
+                        <button id="open-output-btn" class="btn btn-small" style="display: none;">Open Output Folder</button>
+                    </div>
+                </div>
+                <div id="queue-list" class="queue-list">
+                    <p class="queue-empty">Queue is empty. Add files to begin.</p>
+                </div>
+                <div class="queue-progress">
+                    <div class="progress-text">
+                        <span>Overall: <span id="queue-progress-text">0/0</span></span>
+                    </div>
+                    <div class="progress-bar-container">
+                        <div id="queue-progress-bar" class="progress-bar" style="width: 0%;"></div>
+                    </div>
+                </div>
+            </div>
+
             <div class="results-panel">
                 <div class="results-section">
                     <div class="results-header">

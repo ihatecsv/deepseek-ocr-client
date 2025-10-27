@@ -36,6 +36,17 @@ const baseSize = document.getElementById('base-size');
 const imageSize = document.getElementById('image-size');
 const cropMode = document.getElementById('crop-mode');
 
+// Queue elements
+const queueCount = document.getElementById('queue-count');
+const addFilesBtn = document.getElementById('add-files-btn');
+const addFolderBtn = document.getElementById('add-folder-btn');
+const processQueueBtn = document.getElementById('process-queue-btn');
+const clearQueueBtn = document.getElementById('clear-queue-btn');
+const openOutputBtn = document.getElementById('open-output-btn');
+const queueList = document.getElementById('queue-list');
+const queueProgressText = document.getElementById('queue-progress-text');
+const queueProgressBar = document.getElementById('queue-progress-bar');
+
 // Constants
 const DEEPSEEK_COORD_MAX = 999;
 
@@ -61,6 +72,12 @@ let currentRawTokens = null;
 let currentPromptType = null;
 let isProcessing = false;
 let lastBoxCount = 0;
+
+// Queue state
+let queueItems = [];
+let isQueueProcessing = false;
+let currentQueueFolder = null;
+let lastProcessedFileId = null;
 
 window.addEventListener('DOMContentLoaded', () => {
     if (typeof marked !== 'undefined') {
@@ -135,6 +152,13 @@ function setupEventListeners() {
             closeLightbox();
         }
     });
+
+    // Queue operations
+    addFilesBtn.addEventListener('click', addFilesToQueue);
+    addFolderBtn.addEventListener('click', addFolderToQueue);
+    processQueueBtn.addEventListener('click', processQueue);
+    clearQueueBtn.addEventListener('click', clearQueue);
+    openOutputBtn.addEventListener('click', openOutputFolder);
 }
 
 async function checkServerStatus() {
@@ -1005,3 +1029,355 @@ function showMessage(message, type = 'info') {
         resultsContent.innerHTML = `<p class="${type}">${message}</p>`;
     }
 }
+
+// ============= Queue Management Functions =============
+
+async function addFilesToQueue() {
+    const result = await ipcRenderer.invoke('select-images');
+    
+    if (result.success && result.filePaths.length > 0) {
+        await addToQueue(result.filePaths);
+    }
+}
+
+async function addFolderToQueue() {
+    const result = await ipcRenderer.invoke('select-folder');
+    
+    if (result.success) {
+        // Get all image files from folder
+        const fs = require('fs');
+        const path = require('path');
+        
+        try {
+            const files = fs.readdirSync(result.folderPath);
+            const imageExts = ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp'];
+            const imagePaths = files
+                .filter(file => imageExts.includes(path.extname(file).toLowerCase()))
+                .map(file => path.join(result.folderPath, file));
+            
+            if (imagePaths.length > 0) {
+                await addToQueue(imagePaths);
+            } else {
+                showMessage('No image files found in folder', 'warning');
+            }
+        } catch (error) {
+            showMessage(`Error reading folder: ${error.message}`, 'error');
+        }
+    }
+}
+
+async function addToQueue(filePaths) {
+    try {
+        const result = await ipcRenderer.invoke('add-to-queue', {
+            filePaths,
+            promptType: promptType.value,
+            baseSize: parseInt(baseSize.value),
+            imageSize: parseInt(imageSize.value),
+            cropMode: cropMode.checked
+        });
+        
+        if (result.success) {
+            showMessage(`Added ${result.data.added} file(s) to queue`, 'success');
+            await updateQueueDisplay();
+        } else {
+            showMessage(`Failed to add files to queue: ${result.error}`, 'error');
+        }
+    } catch (error) {
+        showMessage(`Error adding files to queue: ${error.message}`, 'error');
+    }
+}
+
+async function updateQueueDisplay() {
+    try {
+        const result = await ipcRenderer.invoke('get-queue-status');
+        
+        if (result.success) {
+            const queueData = result.data;
+            queueItems = queueData.items || [];
+            
+            // Update queue count
+            queueCount.textContent = queueData.total;
+            
+            // Update queue list
+            if (queueItems.length === 0) {
+                queueList.innerHTML = '<p class="queue-empty">Queue is empty. Add files to begin.</p>';
+                processQueueBtn.disabled = true;
+                clearQueueBtn.disabled = true;
+            } else {
+                queueList.innerHTML = '';
+                queueItems.forEach(item => {
+                    const itemEl = createQueueItemElement(item);
+                    queueList.appendChild(itemEl);
+                });
+                processQueueBtn.disabled = isQueueProcessing || queueData.pending === 0;
+                clearQueueBtn.disabled = isQueueProcessing;
+            }
+            
+            // Update progress
+            const totalFiles = queueData.total;
+            const completedFiles = queueData.completed + queueData.failed;
+            queueProgressText.textContent = `${completedFiles}/${totalFiles}`;
+            
+            if (totalFiles > 0) {
+                const progressPercent = (completedFiles / totalFiles) * 100;
+                queueProgressBar.style.width = `${progressPercent}%`;
+            } else {
+                queueProgressBar.style.width = '0%';
+            }
+        }
+    } catch (error) {
+        console.error('Error updating queue display:', error);
+    }
+}
+
+function createQueueItemElement(item) {
+    const div = document.createElement('div');
+    div.className = `queue-item ${item.status}`;
+    div.setAttribute('data-id', item.id);
+    
+    const info = document.createElement('div');
+    info.className = 'queue-item-info';
+    
+    const filename = document.createElement('div');
+    filename.className = 'queue-item-filename';
+    filename.textContent = item.filename;
+    
+    const status = document.createElement('div');
+    status.className = 'queue-item-status';
+    
+    let statusText = '';
+    if (item.status === 'pending') {
+        statusText = 'Waiting...';
+    } else if (item.status === 'processing') {
+        statusText = `Processing... ${item.progress}%`;
+    } else if (item.status === 'completed') {
+        statusText = 'Completed ✓';
+    } else if (item.status === 'failed') {
+        statusText = `Failed: ${item.error || 'Unknown error'}`;
+    }
+    
+    status.innerHTML = `<span class="status-badge ${item.status}">${statusText}</span>`;
+    
+    info.appendChild(filename);
+    info.appendChild(status);
+    
+    const actions = document.createElement('div');
+    actions.className = 'queue-item-actions';
+    
+    if (item.status === 'pending') {
+        const removeBtn = document.createElement('button');
+        removeBtn.className = 'queue-item-remove';
+        removeBtn.textContent = 'Remove';
+        removeBtn.onclick = () => removeFromQueue(item.id);
+        actions.appendChild(removeBtn);
+    }
+    
+    div.appendChild(info);
+    div.appendChild(actions);
+    
+    return div;
+}
+
+async function processQueue() {
+    if (isQueueProcessing) return;
+    
+    try {
+        isQueueProcessing = true;
+        processQueueBtn.disabled = true;
+        processQueueBtn.textContent = 'Processing...';
+        clearQueueBtn.disabled = true;
+        addFilesBtn.disabled = true;
+        addFolderBtn.disabled = true;
+        
+        // Reset preview for queue processing
+        ocrPreviewImage.src = '';
+        ocrBoxesOverlay.innerHTML = '';
+        ocrBoxesOverlay.removeAttribute('viewBox');
+        lastBoxCount = 0;
+        lastProcessedFileId = null;  // Reset file tracking
+        resultsContent.innerHTML = '<p>Queue processing... watch here for real-time preview</p>';
+        
+        // Start polling for queue status updates
+        startQueuePolling();
+        
+        // Show progress
+        progressInline.style.display = 'flex';
+        progressStatus.textContent = 'Starting queue processing (model will auto-load if needed)...';
+        
+        // Start queue processing
+        const result = await ipcRenderer.invoke('process-queue');
+        
+        // Stop polling
+        stopQueuePolling();
+        
+        if (result.success) {
+            currentQueueFolder = result.data.queue_folder;
+            
+            // Show completion message in results panel
+            const completedMsg = `
+                <div style="padding: 20px; background: #f0fdf4; border: 2px solid #10b981; border-radius: 8px; margin: 20px 0;">
+                    <h3 style="color: #065f46; margin: 0 0 10px 0;">✓ Queue Processing Complete!</h3>
+                    <p style="margin: 5px 0;"><strong>Total Files:</strong> ${result.data.total}</p>
+                    <p style="margin: 5px 0;"><strong>Completed:</strong> ${result.data.completed}</p>
+                    <p style="margin: 5px 0;"><strong>Failed:</strong> ${result.data.failed}</p>
+                    <p style="margin: 15px 0 5px 0;"><strong>Results Location:</strong></p>
+                    <code style="background: #dcfce7; padding: 8px; border-radius: 4px; display: block; word-break: break-all; font-size: 12px;">${currentQueueFolder}</code>
+                    <p style="margin: 15px 0 0 0; font-size: 14px;">Click "Open Output Folder" button to view all results →</p>
+                </div>
+            `;
+            resultsContent.innerHTML = completedMsg;
+            
+            // Show open folder button
+            openOutputBtn.style.display = 'inline-block';
+            progressInline.style.display = 'none';
+            
+            // Update display
+            await updateQueueDisplay();
+        } else {
+            progressInline.style.display = 'none';
+            showMessage(`Queue processing failed: ${result.error}`, 'error');
+        }
+    } catch (error) {
+        progressInline.style.display = 'none';
+        stopQueuePolling();
+        showMessage(`Error processing queue: ${error.message}`, 'error');
+    } finally {
+        isQueueProcessing = false;
+        processQueueBtn.textContent = 'Process Queue';
+        addFilesBtn.disabled = false;
+        addFolderBtn.disabled = false;
+        await updateQueueDisplay();
+    }
+}
+
+// Poll queue status during processing
+let queueStatusInterval = null;
+
+function startQueuePolling() {
+    if (queueStatusInterval) return;
+    
+    queueStatusInterval = setInterval(async () => {
+        if (isQueueProcessing) {
+            await updateQueueDisplay();
+            
+            // Update progress status and preview for current file
+            try {
+                const progressResult = await fetch('http://127.0.0.1:5000/progress');
+                const progressData = await progressResult.json();
+                
+                if (progressData.status === 'loading') {
+                    // Model is being loaded
+                    const percent = progressData.progress_percent || 0;
+                    progressStatus.textContent = `Loading model ${percent}% before processing queue...`;
+                } else if (progressData.status === 'processing') {
+                    // Show current file being processed
+                    progressStatus.textContent = progressData.message || 'Processing...';
+                    
+                    // Update preview with current file if available
+                    const queueStatusResult = await fetch('http://127.0.0.1:5000/queue/status');
+                    const queueData = await queueStatusResult.json();
+                    
+                    if (queueData.current_file && queueData.current_file.image_path) {
+                        // Check if we switched to a new file
+                        if (lastProcessedFileId !== queueData.current_file.id) {
+                            lastProcessedFileId = queueData.current_file.id;
+                            
+                            // Reset boxes for new file
+                            ocrBoxesOverlay.innerHTML = '';
+                            ocrBoxesOverlay.removeAttribute('viewBox');
+                            lastBoxCount = 0;
+                            resultsContent.innerHTML = `<p>Processing ${queueData.current_file.filename}...</p>`;
+                            
+                            // Load new file image
+                            ocrPreviewImage.src = queueData.current_file.image_path;
+                            
+                            // Wait for image to load
+                            await new Promise((resolve) => {
+                                ocrPreviewImage.onload = resolve;
+                                setTimeout(resolve, 1000);
+                            });
+                        }
+                        
+                        // Render boxes in real-time if we have raw tokens
+                        if (progressData.raw_token_stream && ocrPreviewImage.naturalWidth > 0) {
+                            const boxes = parseBoxesFromTokens(progressData.raw_token_stream, false);
+                            renderBoxes(boxes, ocrPreviewImage.naturalWidth, ocrPreviewImage.naturalHeight, promptType.value);
+                            
+                            // Also show text in real-time
+                            if (promptType.value === 'ocr') {
+                                const extractedText = extractTextFromTokens(progressData.raw_token_stream);
+                                if (extractedText) {
+                                    resultsContent.textContent = extractedText;
+                                }
+                            } else if (promptType.value === 'document') {
+                                resultsContent.textContent = progressData.raw_token_stream;
+                            } else {
+                                resultsContent.textContent = progressData.raw_token_stream;
+                            }
+                        }
+                    }
+                }
+            } catch (err) {
+                // Ignore polling errors
+                console.error('Polling error:', err);
+            }
+        } else {
+            stopQueuePolling();
+        }
+    }, 500); // Poll every 500ms for smoother updates
+}
+
+function stopQueuePolling() {
+    if (queueStatusInterval) {
+        clearInterval(queueStatusInterval);
+        queueStatusInterval = null;
+    }
+}
+
+async function clearQueue() {
+    if (isQueueProcessing) return;
+    
+    if (!confirm('Are you sure you want to clear the entire queue?')) {
+        return;
+    }
+    
+    try {
+        const result = await ipcRenderer.invoke('clear-queue');
+        
+        if (result.success) {
+            showMessage('Queue cleared', 'success');
+            await updateQueueDisplay();
+        } else {
+            showMessage(`Failed to clear queue: ${result.error}`, 'error');
+        }
+    } catch (error) {
+        showMessage(`Error clearing queue: ${error.message}`, 'error');
+    }
+}
+
+async function removeFromQueue(itemId) {
+    try {
+        const result = await ipcRenderer.invoke('remove-from-queue', itemId);
+        
+        if (result.success) {
+            await updateQueueDisplay();
+        } else {
+            showMessage(`Failed to remove item: ${result.error}`, 'error');
+        }
+    } catch (error) {
+        showMessage(`Error removing item: ${error.message}`, 'error');
+    }
+}
+
+async function openOutputFolder() {
+    if (currentQueueFolder) {
+        await ipcRenderer.invoke('open-folder', currentQueueFolder);
+    }
+}
+
+// Poll queue status periodically when not processing
+setInterval(() => {
+    if (!isQueueProcessing && queueItems.length > 0) {
+        updateQueueDisplay();
+    }
+}, 5000); // Check every 5 seconds
