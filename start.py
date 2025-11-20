@@ -177,7 +177,7 @@ def setup_python_environment():
 
         subprocess.run([
             str(pip_path), "install",
-            "torch==2.6.0", "torchvision==0.21.0", "torchaudio==2.6.0",
+            "torch==2.9.1", "torchvision==0.24.1", "torchaudio==2.9.1",
             "--index-url", index_url
         ], env=env_with_temp, check=True, shell=(sys.platform == "win32"))
         print("✓ PyTorch installed")

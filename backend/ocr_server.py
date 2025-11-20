@@ -27,7 +27,7 @@ CORS(app)
 # Global variables for model and tokenizer
 model = None
 tokenizer = None
-MODEL_NAME = 'deepseek-ai/DeepSeek-OCR'
+MODEL_NAME = 'Dogacel/DeepSeek-OCR-Metal-MPS'
 
 # Use local cache directory relative to the app
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -64,14 +64,17 @@ def update_progress(status, stage='', message='', progress_percent=0, chars_gene
         else:
             logger.info(f"Progress: {status} - {stage} - {message} ({progress_percent}%)")
 
-def check_gpu_availability():
-    """Check if CUDA is available"""
+def get_prefered_device():
+    """Get the preferred device (GPU if available)"""
+    if 'DEVICE' in os.environ:
+        return os.environ['DEVICE'].lower()
+
     if torch.cuda.is_available():
-        logger.info(f"GPU available: {torch.cuda.get_device_name(0)}")
-        return True
+        return "cuda"
+    elif torch.mps.is_available():
+        return "mps"
     else:
-        logger.warning("No GPU available, will use CPU (this will be slow!)")
-        return False
+        return "cpu"
 
 def get_cache_dir_size(directory):
     """Get total size of files in directory in bytes"""
@@ -88,7 +91,7 @@ def get_cache_dir_size(directory):
 
 def load_model_background():
     """Background thread function to load the model"""
-    global model, tokenizer
+    global model, tokenizer, device, dtype
 
     try:
         update_progress('loading', 'init', 'Initializing model loading...', 0)
@@ -99,7 +102,7 @@ def load_model_background():
         os.makedirs(MODEL_CACHE_DIR, exist_ok=True)
 
         # Check GPU availability
-        has_gpu = check_gpu_availability()
+        device = get_prefered_device()
 
         # Load tokenizer (10% progress)
         update_progress('loading', 'tokenizer', 'Loading tokenizer...', 10)
@@ -185,11 +188,18 @@ def load_model_background():
 
         # Move to GPU if available (90% progress)
         update_progress('loading', 'gpu', 'Optimizing model on GPU...', 90)
-        if has_gpu:
+        if device == "cuda":
+            device, dtype = "cuda", torch.bfloat16
             model = model.cuda().to(torch.bfloat16)
             logger.info("Model loaded on GPU with bfloat16")
+        elif device == "mps":
+            device, dtype = "mps", torch.float16
+            model = model.to(torch.device("mps")).to(torch.float16)
+            logger.info("Model loaded on Apple Silicon GPU (MPS) with float16")
         else:
-            # CPU mode - use float32
+            # CPU mode - use float16
+            device, dtype = "cpu", torch.float16
+            model = model.to(torch.device("cpu")).to(torch.float16)
             logger.info("Model loaded on CPU (inference will be slower)")
 
         logger.info("Model loaded successfully!")
@@ -236,7 +246,7 @@ def health_check():
     return jsonify({
         'status': 'ok',
         'model_loaded': model is not None,
-        'gpu_available': torch.cuda.is_available()
+        'device_state': get_prefered_device()
     })
 
 @app.route('/progress', methods=['GET'])
@@ -258,7 +268,7 @@ def load_model_endpoint():
 @app.route('/ocr', methods=['POST'])
 def perform_ocr():
     """Perform OCR on uploaded image"""
-    global model, tokenizer
+    global model, tokenizer, device, dtype
 
     try:
         # Check if model is loaded
@@ -384,6 +394,8 @@ def perform_ocr():
         try:
             model.infer(
                 tokenizer,
+                device=torch.device(device),
+                dtype=dtype,
                 prompt=prompt,
                 image_file=temp_image_path,
                 output_path=OUTPUT_DIR,

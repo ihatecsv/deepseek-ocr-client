@@ -149,9 +149,22 @@ async function checkServerStatus() {
             modelStatus.textContent = modelLoaded ? 'Loaded' : 'Not loaded';
             modelStatus.className = `status-value ${modelLoaded ? 'success' : 'warning'}`;
 
-            const gpuAvailable = result.data.gpu_available;
-            gpuStatus.textContent = gpuAvailable ? 'Available' : 'CPU Only';
-            gpuStatus.className = `status-value ${gpuAvailable ? 'success' : 'warning'}`;
+            let deviceState = result.data.device_state;
+
+            switch (deviceState) {
+                case 'cuda':
+                    deviceState = 'GPU (CUDA)';
+                    break;
+                case 'mps':
+                    deviceState = 'Apple Metal (MPS)';
+                    break;
+                case 'cpu':
+                    deviceState = 'CPU';
+                    break;
+            }
+
+            gpuStatus.textContent = deviceState;
+            gpuStatus.className = `status-value ${deviceState ? 'success' : 'warning'}`;
 
             // Update load model button state (but don't change if currently processing)
             if (!isProcessing) {
