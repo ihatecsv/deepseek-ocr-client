@@ -9,6 +9,8 @@ const viewTokensBtn = document.getElementById('view-tokens-btn');
 const downloadZipBtn = document.getElementById('download-zip-btn');
 const ocrBtn = document.getElementById('ocr-btn');
 const ocrBtnText = document.getElementById('ocr-btn-text');
+const pdfOcrBtn = document.getElementById('pdf-ocr-btn');
+const batchOcrBtn = document.getElementById('batch-ocr-btn');
 const loadModelBtn = document.getElementById('load-model-btn');
 const copyBtn = document.getElementById('copy-btn');
 const previewSection = document.getElementById('preview-section');
@@ -18,6 +20,8 @@ const ocrPreviewImage = document.getElementById('ocr-preview-image');
 const ocrBoxesOverlay = document.getElementById('ocr-boxes-overlay');
 const progressInline = document.getElementById('progress-inline');
 const progressStatus = document.getElementById('progress-status');
+const serverUrlInput = document.getElementById('server-url');
+const checkUpdatesBtn = document.getElementById('check-updates-btn');
 
 // Lightbox elements
 const lightbox = document.getElementById('lightbox');
@@ -35,6 +39,7 @@ const promptType = document.getElementById('prompt-type');
 const baseSize = document.getElementById('base-size');
 const imageSize = document.getElementById('image-size');
 const cropMode = document.getElementById('crop-mode');
+const forceCpu = document.getElementById('force-cpu');
 
 // Constants
 const DEEPSEEK_COORD_MAX = 999;
@@ -118,6 +123,8 @@ function setupEventListeners() {
 
     // OCR
     ocrBtn.addEventListener('click', performOCR);
+    pdfOcrBtn.addEventListener('click', performPDFOCR);
+    batchOcrBtn.addEventListener('click', performBatchOCR);
 
     // Load model
     loadModelBtn.addEventListener('click', loadModel);
@@ -135,11 +142,28 @@ function setupEventListeners() {
             closeLightbox();
         }
     });
+
+    // Server URL persistence
+    const savedUrl = localStorage.getItem('serverUrl');
+    if (savedUrl) {
+        serverUrlInput.value = savedUrl;
+    }
+    serverUrlInput.addEventListener('change', () => {
+        localStorage.setItem('serverUrl', serverUrlInput.value.trim());
+        checkServerStatus();
+    });
+
+    checkUpdatesBtn.addEventListener('click', checkForUpdates);
+}
+
+function getServerUrl() {
+    const url = (serverUrlInput && serverUrlInput.value) ? serverUrlInput.value.trim() : 'http://127.0.0.1:5000';
+    return url.endsWith('/') ? url.slice(0, -1) : url;
 }
 
 async function checkServerStatus() {
     try {
-        const result = await ipcRenderer.invoke('check-server-status');
+        const result = await ipcRenderer.invoke('check-server-status', { serverUrl: getServerUrl() });
 
         if (result.success) {
             serverStatus.textContent = 'Connected';
@@ -607,22 +631,28 @@ async function loadModel() {
         loadModelBtn.disabled = true;
         loadModelBtn.textContent = 'Loading Model...';
 
-        // Show inline progress indicator
-        progressInline.style.display = 'flex';
-        progressStatus.textContent = 'Loading model...';
+        const modelProgress = document.getElementById('model-progress');
+        const progressBar = document.getElementById('progress-bar');
+        const progressStage = document.getElementById('progress-stage');
+        const progressPercent = document.getElementById('progress-percent');
+        modelProgress.style.display = 'block';
 
         // Start polling for progress updates
         const pollProgress = async () => {
             try {
-                const response = await fetch('http://127.0.0.1:5000/progress');
+                const response = await fetch(`${getServerUrl()}/progress`);
                 const data = await response.json();
                 console.log('Progress update:', data);
 
                 if (data.status === 'loading') {
-                    const percent = data.progress_percent || 0;
-                    progressStatus.textContent = `Loading ${percent}% - ${data.stage || ''}`;
+                    const percent = Math.max(0, Math.min(100, data.progress_percent || 0));
+                    progressBar.style.width = `${percent}%`;
+                    progressStage.textContent = data.stage || '';
+                    progressPercent.textContent = `${percent}%`;
                 } else if (data.status === 'loaded') {
-                    progressStatus.textContent = 'Model loaded successfully!';
+                    progressBar.style.width = '100%';
+                    progressStage.textContent = 'complete';
+                    progressPercent.textContent = '100%';
 
                     // Stop polling when done
                     if (pollInterval) {
@@ -630,7 +660,7 @@ async function loadModel() {
                         pollInterval = null;
                     }
                 } else if (data.status === 'error') {
-                    progressStatus.textContent = 'Error loading model';
+                    progressStage.textContent = 'error';
 
                     // Stop polling on error
                     if (pollInterval) {
@@ -643,17 +673,17 @@ async function loadModel() {
             }
         };
 
-        // Poll every 500ms
+        // Poll every 400ms
         pollInterval = setInterval(pollProgress, 500);
 
         // Trigger model loading
-        const result = await ipcRenderer.invoke('load-model');
+        const result = await ipcRenderer.invoke('load-model', { serverUrl: getServerUrl(), forceCpu: !!(forceCpu && forceCpu.checked) });
 
         // Wait for final status
         await new Promise(resolve => {
             const checkStatus = setInterval(async () => {
                 try {
-                    const response = await fetch('http://127.0.0.1:5000/progress');
+                    const response = await fetch(`${getServerUrl()}/progress`);
                     const data = await response.json();
 
                     if (data.status === 'loaded' || data.status === 'error') {
@@ -670,8 +700,7 @@ async function loadModel() {
             }, 500);
         });
 
-        // Hide progress indicator
-        progressInline.style.display = 'none';
+        modelProgress.style.display = 'none';
 
         if (result.success) {
             showMessage('Model loaded successfully!', 'success');
@@ -738,7 +767,7 @@ async function performOCR() {
         // Poll for token count and raw token stream updates
         tokenPollInterval = setInterval(async () => {
             try {
-                const response = await fetch('http://127.0.0.1:5000/progress');
+                const response = await fetch(`${getServerUrl()}/progress`);
                 const data = await response.json();
 
                 if (data.status === 'processing') {
@@ -777,7 +806,8 @@ async function performOCR() {
             promptType: promptType.value,
             baseSize: parseInt(baseSize.value),
             imageSize: parseInt(imageSize.value),
-            cropMode: cropMode.checked
+            cropMode: cropMode.checked,
+            serverUrl: getServerUrl()
         });
 
         // Stop polling
@@ -901,7 +931,7 @@ function displayResults(result, promptType) {
         const cacheBuster = Date.now();
         const renderedMarkdown = formattedResult.replace(
             /!\[([^\]]*)\]\(images\/([^)]+)\)/g,
-            `![$1](http://127.0.0.1:5000/outputs/images/$2?t=${cacheBuster})`
+            `![$1](${getServerUrl()}/outputs/images/$2?t=${cacheBuster})`
         );
         resultsContent.innerHTML = marked.parse(renderedMarkdown);
     } else {
@@ -955,7 +985,7 @@ async function downloadZip() {
         const imagesFolder = zip.folder('images');
         const imagePromises = Array.from(imageFiles).map(async (filename) => {
             try {
-                const response = await fetch(`http://127.0.0.1:5000/outputs/images/${filename}`);
+                const response = await fetch(`${getServerUrl()}/outputs/images/${filename}`);
                 if (response.ok) {
                     const blob = await response.blob();
                     imagesFolder.file(filename, blob);
@@ -1003,5 +1033,128 @@ function showMessage(message, type = 'info') {
     console.log(`[${type.toUpperCase()}] ${message}`);
     if (resultsContent.textContent.includes('OCR results will appear here')) {
         resultsContent.innerHTML = `<p class="${type}">${message}</p>`;
+    }
+}
+async function performPDFOCR() {
+    if (isProcessing) return;
+
+    try {
+        isProcessing = true;
+        pdfOcrBtn.disabled = true;
+        progressInline.style.display = 'flex';
+        progressStatus.textContent = 'Selecting PDF...';
+
+        const sel = await ipcRenderer.invoke('select-pdf');
+        if (!sel.success) {
+            progressInline.style.display = 'none';
+            pdfOcrBtn.disabled = false;
+            return;
+        }
+
+        progressStatus.textContent = 'Processing PDF...';
+
+        const result = await ipcRenderer.invoke('perform-ocr-pdf', {
+            pdfPath: sel.filePath,
+            promptType: promptType.value,
+            baseSize: parseInt(baseSize.value),
+            imageSize: parseInt(imageSize.value),
+            cropMode: cropMode.checked,
+            serverUrl: getServerUrl()
+        });
+
+        progressInline.style.display = 'none';
+
+        if (result.success) {
+            currentPromptType = result.data.prompt_type;
+            const combinedText = result.data.combined_text || '';
+            displayResults(combinedText, currentPromptType);
+            copyBtn.style.display = 'inline-block';
+            downloadZipBtn.style.display = currentPromptType === 'document' ? 'inline-block' : 'none';
+            showMessage('PDF OCR completed successfully', 'success');
+        } else {
+            resultsContent.innerHTML = `<p class="error">Error: ${result.error}</p>`;
+            copyBtn.style.display = 'none';
+            downloadZipBtn.style.display = 'none';
+            showMessage(`PDF OCR failed: ${result.error}`, 'error');
+        }
+    } catch (error) {
+        progressInline.style.display = 'none';
+        resultsContent.innerHTML = `<p class="error">Error: ${error.message}</p>`;
+        copyBtn.style.display = 'none';
+        downloadZipBtn.style.display = 'none';
+        showMessage(`Error: ${error.message}`, 'error');
+    } finally {
+        isProcessing = false;
+        pdfOcrBtn.disabled = false;
+    }
+}
+async function performBatchOCR() {
+    if (isProcessing) return;
+
+    try {
+        isProcessing = true;
+        batchOcrBtn.disabled = true;
+        progressInline.style.display = 'flex';
+        progressStatus.textContent = 'Selecting images...';
+
+        const sel = await ipcRenderer.invoke('select-images');
+        if (!sel.success) {
+            progressInline.style.display = 'none';
+            batchOcrBtn.disabled = false;
+            return;
+        }
+
+        progressStatus.textContent = 'Processing batch...';
+
+        const result = await ipcRenderer.invoke('perform-ocr-batch', {
+            imagePaths: sel.filePaths,
+            promptType: promptType.value,
+            baseSize: parseInt(baseSize.value),
+            imageSize: parseInt(imageSize.value),
+            cropMode: cropMode.checked,
+            serverUrl: getServerUrl()
+        });
+
+        progressInline.style.display = 'none';
+
+        if (result.success) {
+            currentPromptType = result.data.prompt_type;
+            const combinedText = result.data.combined_text || '';
+            displayResults(combinedText, currentPromptType);
+            copyBtn.style.display = 'inline-block';
+            downloadZipBtn.style.display = currentPromptType === 'document' ? 'inline-block' : 'none';
+            showMessage('Batch OCR completed successfully', 'success');
+        } else {
+            resultsContent.innerHTML = `<p class="error">Error: ${result.error}</p>`;
+            copyBtn.style.display = 'none';
+            downloadZipBtn.style.display = 'none';
+            showMessage(`Batch OCR failed: ${result.error}`, 'error');
+        }
+    } catch (error) {
+        progressInline.style.display = 'none';
+        resultsContent.innerHTML = `<p class="error">Error: ${error.message}</p>`;
+        copyBtn.style.display = 'none';
+        downloadZipBtn.style.display = 'none';
+        showMessage(`Error: ${error.message}`, 'error');
+    } finally {
+        isProcessing = false;
+        batchOcrBtn.disabled = false;
+    }
+}
+async function checkForUpdates() {
+    try {
+        const result = await ipcRenderer.invoke('check-updates');
+        if (result.success) {
+            const d = result.data;
+            if (d.hasUpdate) {
+                showMessage(`Update available: ${d.latestTag}`, 'success');
+            } else {
+                showMessage('You are up to date', 'info');
+            }
+        } else {
+            showMessage(`Update check failed: ${result.error}`, 'error');
+        }
+    } catch (e) {
+        showMessage(`Update check error: ${e.message}`, 'error');
     }
 }

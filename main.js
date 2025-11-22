@@ -3,11 +3,12 @@ const path = require('path');
 const { spawn } = require('child_process');
 const fs = require('fs');
 const axios = require('axios');
+const semver = require('semver');
 
 let mainWindow;
 let pythonProcess;
 const PYTHON_SERVER_PORT = 5000;
-const PYTHON_SERVER_URL = `http://127.0.0.1:${PYTHON_SERVER_PORT}`;
+let PYTHON_SERVER_URL = `http://127.0.0.1:${PYTHON_SERVER_PORT}`;
 
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -157,27 +158,30 @@ function stopPythonServer() {
 }
 
 // IPC Handlers
-ipcMain.handle('check-server-status', async () => {
+ipcMain.handle('check-server-status', async (event, { serverUrl }) => {
   try {
-    const response = await axios.get(`${PYTHON_SERVER_URL}/health`);
+    const base = serverUrl || PYTHON_SERVER_URL;
+    const response = await axios.get(`${base}/health`);
     return { success: true, data: response.data };
   } catch (error) {
     return { success: false, error: error.message };
   }
 });
 
-ipcMain.handle('load-model', async () => {
+ipcMain.handle('load-model', async (event, { serverUrl, forceCpu }) => {
   try {
-    const response = await axios.post(`${PYTHON_SERVER_URL}/load_model`);
+    const base = serverUrl || PYTHON_SERVER_URL;
+    const response = await axios.post(`${base}/load_model`, { force_cpu: !!forceCpu });
     return { success: true, data: response.data };
   } catch (error) {
     return { success: false, error: error.message };
   }
 });
 
-ipcMain.handle('get-model-info', async () => {
+ipcMain.handle('get-model-info', async (event, { serverUrl }) => {
   try {
-    const response = await axios.get(`${PYTHON_SERVER_URL}/model_info`);
+    const base = serverUrl || PYTHON_SERVER_URL;
+    const response = await axios.get(`${base}/model_info`);
     return { success: true, data: response.data };
   } catch (error) {
     return { success: false, error: error.message };
@@ -198,7 +202,70 @@ ipcMain.handle('select-image', async () => {
   return { success: false };
 });
 
-ipcMain.handle('perform-ocr', async (event, { imagePath, promptType, baseSize, imageSize, cropMode }) => {
+ipcMain.handle('select-images', async () => {
+  const result = await dialog.showOpenDialog(mainWindow, {
+    properties: ['openFile', 'multiSelections'],
+    filters: [
+      { name: 'Images', extensions: ['jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp'] }
+    ]
+  });
+
+  if (!result.canceled && result.filePaths.length > 0) {
+    return { success: true, filePaths: result.filePaths };
+  }
+  return { success: false };
+});
+
+ipcMain.handle('select-pdf', async () => {
+  const result = await dialog.showOpenDialog(mainWindow, {
+    properties: ['openFile'],
+    filters: [
+      { name: 'PDF', extensions: ['pdf'] }
+    ]
+  });
+
+  if (!result.canceled && result.filePaths.length > 0) {
+    return { success: true, filePath: result.filePaths[0] };
+  }
+  return { success: false };
+});
+
+ipcMain.handle('perform-ocr-batch', async (event, { imagePaths, promptType, baseSize, imageSize, cropMode, serverUrl }) => {
+  try {
+    const FormData = require('form-data');
+    const formData = new FormData();
+
+    for (const imagePath of imagePaths) {
+      const imageBuffer = fs.readFileSync(imagePath);
+      formData.append('images', imageBuffer, {
+        filename: path.basename(imagePath),
+        contentType: 'image/jpeg'
+      });
+    }
+
+    formData.append('prompt_type', promptType || 'document');
+    formData.append('base_size', baseSize || 1024);
+    formData.append('image_size', imageSize || 640);
+    formData.append('crop_mode', cropMode ? 'true' : 'false');
+
+    const base = serverUrl || PYTHON_SERVER_URL;
+    const response = await axios.post(`${base}/ocr_batch`, formData, {
+      headers: formData.getHeaders(),
+      maxContentLength: Infinity,
+      maxBodyLength: Infinity
+    });
+
+    return { success: true, data: response.data };
+  } catch (error) {
+    console.error('OCR Batch Error:', error);
+    return {
+      success: false,
+      error: error.response?.data?.message || error.message
+    };
+  }
+});
+
+ipcMain.handle('perform-ocr', async (event, { imagePath, promptType, baseSize, imageSize, cropMode, serverUrl }) => {
   try {
     const FormData = require('form-data');
     const formData = new FormData();
@@ -215,7 +282,8 @@ ipcMain.handle('perform-ocr', async (event, { imagePath, promptType, baseSize, i
     formData.append('image_size', imageSize || 640);
     formData.append('crop_mode', cropMode ? 'true' : 'false');
 
-    const response = await axios.post(`${PYTHON_SERVER_URL}/ocr`, formData, {
+    const base = serverUrl || PYTHON_SERVER_URL;
+    const response = await axios.post(`${base}/ocr`, formData, {
       headers: formData.getHeaders(),
       maxContentLength: Infinity,
       maxBodyLength: Infinity
@@ -224,6 +292,39 @@ ipcMain.handle('perform-ocr', async (event, { imagePath, promptType, baseSize, i
     return { success: true, data: response.data };
   } catch (error) {
     console.error('OCR Error:', error);
+    return {
+      success: false,
+      error: error.response?.data?.message || error.message
+    };
+  }
+});
+
+ipcMain.handle('perform-ocr-pdf', async (event, { pdfPath, promptType, baseSize, imageSize, cropMode, serverUrl }) => {
+  try {
+    const FormData = require('form-data');
+    const formData = new FormData();
+
+    const pdfBuffer = fs.readFileSync(pdfPath);
+    formData.append('pdf', pdfBuffer, {
+      filename: path.basename(pdfPath),
+      contentType: 'application/pdf'
+    });
+
+    formData.append('prompt_type', promptType || 'document');
+    formData.append('base_size', baseSize || 1024);
+    formData.append('image_size', imageSize || 640);
+    formData.append('crop_mode', cropMode ? 'true' : 'false');
+
+    const base = serverUrl || PYTHON_SERVER_URL;
+    const response = await axios.post(`${base}/ocr_pdf`, formData, {
+      headers: formData.getHeaders(),
+      maxContentLength: Infinity,
+      maxBodyLength: Infinity
+    });
+
+    return { success: true, data: response.data };
+  } catch (error) {
+    console.error('OCR PDF Error:', error);
     return {
       success: false,
       error: error.response?.data?.message || error.message
@@ -257,4 +358,22 @@ app.on('window-all-closed', function () {
 
 app.on('before-quit', () => {
   stopPythonServer();
+});
+ipcMain.handle('check-updates', async () => {
+  try {
+    const repo = 'ihatecsv/deepseek-ocr-client';
+    const url = `https://api.github.com/repos/${repo}/releases/latest`;
+    const response = await axios.get(url, { headers: { 'Accept': 'application/vnd.github+json' } });
+    const latestTag = response.data.tag_name || response.data.name || '';
+    const currentVersion = app.getVersion() || require('./package.json').version;
+
+    let hasUpdate = false;
+    if (semver.valid(latestTag) && semver.valid(currentVersion)) {
+      hasUpdate = semver.gt(latestTag, currentVersion);
+    }
+
+    return { success: true, data: { latestTag, currentVersion, hasUpdate, html_url: response.data.html_url } };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
 });

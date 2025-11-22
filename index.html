@@ -37,6 +37,8 @@
                         <a href="https://github.com/deepseek-ai/DeepSeek-OCR" target="_blank">Model GitHub</a>
                         <span class="link-divider">•</span>
                         <a href="https://github.com/ihatecsv/deepseek-ocr-client" target="_blank">Client GitHub</a>
+                        <span class="link-divider">•</span>
+                        <button id="check-updates-btn" class="btn btn-compact">Check Updates</button>
                     </div>
                 </div>
 
@@ -45,6 +47,10 @@
                 <div class="header-right">
                     <div class="controls-section">
                         <div class="controls-grid">
+                            <div class="form-group">
+                                <label for="server-url">Server:</label>
+                                <input type="text" id="server-url" placeholder="http://127.0.0.1:5000" value="http://127.0.0.1:5000" />
+                            </div>
                             <div class="form-group">
                                 <label for="prompt-type">Type:</label>
                                 <select id="prompt-type">
@@ -82,11 +88,24 @@
                                     Crop
                                 </label>
                             </div>
+
+                            <div class="form-group">
+                                <label>
+                                    <input type="checkbox" id="force-cpu">
+                                    Force CPU
+                                </label>
+                            </div>
                         </div>
 
                         <div class="controls-buttons">
                             <button id="ocr-btn" class="btn btn-primary" disabled>
                                 <span id="ocr-btn-text">Run OCR</span>
+                            </button>
+                            <button id="pdf-ocr-btn" class="btn btn-secondary">
+                                OCR PDF
+                            </button>
+                            <button id="batch-ocr-btn" class="btn btn-secondary">
+                                Batch OCR
                             </button>
                             <button id="load-model-btn" class="btn btn-secondary">
                                 Load Model

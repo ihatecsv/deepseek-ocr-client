@@ -13,6 +13,7 @@ from transformers import AutoModel, AutoTokenizer
 import tempfile
 import time
 from threading import Thread, Lock
+import fitz
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -34,6 +35,9 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 CACHE_DIR = os.path.join(SCRIPT_DIR, '..', 'cache')
 MODEL_CACHE_DIR = os.path.join(CACHE_DIR, 'models')
 OUTPUT_DIR = os.path.join(CACHE_DIR, 'outputs')
+
+# Device preference: 'auto' | 'cpu' | 'gpu'
+device_preference = 'auto'
 
 # Progress tracking
 progress_data = {
@@ -184,12 +188,15 @@ def load_model_background():
         model = model.eval()
 
         # Move to GPU if available (90% progress)
-        update_progress('loading', 'gpu', 'Optimizing model on GPU...', 90)
-        if has_gpu:
+        update_progress('loading', 'gpu', 'Optimizing model...', 90)
+        if device_preference == 'cpu':
+            logger.info("Device preference set to CPU")
+        elif device_preference == 'gpu' and not has_gpu:
+            logger.warning("GPU requested but not available; falling back to CPU")
+        if has_gpu and device_preference != 'cpu':
             model = model.cuda().to(torch.bfloat16)
             logger.info("Model loaded on GPU with bfloat16")
         else:
-            # CPU mode - use float32
             logger.info("Model loaded on CPU (inference will be slower)")
 
         logger.info("Model loaded successfully!")
@@ -249,6 +256,16 @@ def get_progress():
 @app.route('/load_model', methods=['POST'])
 def load_model_endpoint():
     """Endpoint to trigger model loading"""
+    global device_preference
+    try:
+        data = request.get_json(silent=True) or {}
+        if 'force_cpu' in data and data['force_cpu']:
+            device_preference = 'cpu'
+        else:
+            device_preference = 'auto'
+    except Exception:
+        device_preference = 'auto'
+
     success = load_model()
     if success:
         return jsonify({'status': 'success', 'message': 'Model loaded successfully'})
@@ -460,6 +477,129 @@ def perform_ocr():
             'message': str(e)
         }), 500
 
+@app.route('/ocr_pdf', methods=['POST'])
+def perform_ocr_pdf():
+    """Perform OCR on uploaded PDF (per-page)"""
+    global model, tokenizer
+
+    try:
+        if model is None or tokenizer is None:
+            logger.info("Model not loaded, loading now...")
+            if not load_model():
+                return jsonify({'status': 'error', 'message': 'Failed to load model'}), 500
+
+        if 'pdf' not in request.files:
+            return jsonify({'status': 'error', 'message': 'No PDF provided'}), 400
+
+        pdf_file = request.files['pdf']
+        prompt_type = request.form.get('prompt_type', 'document')
+        base_size = int(request.form.get('base_size', 1024))
+        image_size = int(request.form.get('image_size', 640))
+        crop_mode = request.form.get('crop_mode', 'true').lower() == 'true'
+
+        prompt_configs = {
+            'document': {
+                'prompt': '<image>\n<|grounding|>Convert the document to markdown. ',
+                'output_file': 'result.mmd'
+            },
+            'ocr': {
+                'prompt': '<image>\n<|grounding|>OCR this image. ',
+                'output_file': 'result.txt'
+            },
+            'free': {
+                'prompt': '<image>\nFree OCR. ',
+                'output_file': 'result.txt'
+            },
+            'figure': {
+                'prompt': '<image>\nParse the figure. ',
+                'output_file': 'result.txt'
+            },
+            'describe': {
+                'prompt': '<image>\nDescribe this image in detail. ',
+                'output_file': 'result.txt'
+            }
+        }
+        config = prompt_configs.get(prompt_type, prompt_configs['document'])
+
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp_pdf:
+            pdf_file.save(tmp_pdf.name)
+            temp_pdf_path = tmp_pdf.name
+
+        doc = fitz.open(temp_pdf_path)
+        os.makedirs(OUTPUT_DIR, exist_ok=True)
+        pages_output = []
+        combined_texts = []
+
+        for page_index in range(len(doc)):
+            page = doc.load_page(page_index)
+            pix = page.get_pixmap(dpi=144)
+            with tempfile.NamedTemporaryFile(delete=False, suffix='.jpg') as tmp_img:
+                pix.save(tmp_img.name)
+                temp_image_path = tmp_img.name
+
+            page_dir = os.path.join(OUTPUT_DIR, f'pdf_page_{page_index+1}')
+            os.makedirs(page_dir, exist_ok=True)
+
+            update_progress('processing', 'ocr', f'Processing PDF page {page_index+1}/{len(doc)}', int( (page_index/ max(1,len(doc))) * 50))
+
+            model.infer(
+                tokenizer,
+                prompt=config['prompt'],
+                image_file=temp_image_path,
+                output_path=page_dir,
+                base_size=base_size,
+                image_size=image_size,
+                crop_mode=crop_mode,
+                save_results=True,
+                test_compress=True
+            )
+
+            result_filepath = os.path.join(page_dir, config['output_file'])
+            text = None
+            if os.path.exists(result_filepath):
+                with open(result_filepath, 'r', encoding='utf-8') as f:
+                    text = f.read()
+            else:
+                for filename in os.listdir(page_dir):
+                    if filename.endswith(('.txt', '.mmd', '.md')):
+                        with open(os.path.join(page_dir, filename), 'r', encoding='utf-8') as f:
+                            text = f.read()
+                        break
+
+            boxes_image_rel = None
+            boxes_image_path = os.path.join(page_dir, 'result_with_boxes.jpg')
+            if os.path.exists(boxes_image_path):
+                boxes_image_rel = f'pdf_page_{page_index+1}/result_with_boxes.jpg'
+
+            pages_output.append({
+                'page': page_index + 1,
+                'text': text or '',
+                'boxes_image_path': boxes_image_rel
+            })
+            combined_texts.append(text or '')
+
+            if os.path.exists(temp_image_path):
+                os.remove(temp_image_path)
+
+        doc.close()
+        if os.path.exists(temp_pdf_path):
+            os.remove(temp_pdf_path)
+
+        update_progress('idle', '', '', 0, 0)
+
+        return jsonify({
+            'status': 'success',
+            'prompt_type': prompt_type,
+            'pages': pages_output,
+            'combined_text': '\n\n'.join(combined_texts)
+        })
+
+    except Exception as e:
+        logger.error(f"Error during PDF OCR: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
 @app.route('/model_info', methods=['GET'])
 def model_info():
     """Get information about the model"""
@@ -468,13 +608,120 @@ def model_info():
         'cache_dir': MODEL_CACHE_DIR,
         'model_loaded': model is not None,
         'gpu_available': torch.cuda.is_available(),
-        'gpu_name': torch.cuda.get_device_name(0) if torch.cuda.is_available() else None
+        'gpu_name': torch.cuda.get_device_name(0) if torch.cuda.is_available() else None,
+        'device_preference': device_preference
     })
 
 @app.route('/outputs/<path:filename>', methods=['GET'])
 def serve_output_file(filename):
     """Serve files from the outputs directory"""
     return send_from_directory(OUTPUT_DIR, filename)
+
+@app.route('/ocr_batch', methods=['POST'])
+def perform_ocr_batch():
+    """Perform OCR on multiple uploaded images"""
+    global model, tokenizer
+
+    try:
+        if model is None or tokenizer is None:
+            logger.info("Model not loaded, loading now...")
+            if not load_model():
+                return jsonify({'status': 'error', 'message': 'Failed to load model'}), 500
+
+        images = request.files.getlist('images')
+        if not images:
+            return jsonify({'status': 'error', 'message': 'No images provided'}), 400
+
+        prompt_type = request.form.get('prompt_type', 'document')
+        base_size = int(request.form.get('base_size', 1024))
+        image_size = int(request.form.get('image_size', 640))
+        crop_mode = request.form.get('crop_mode', 'true').lower() == 'true'
+
+        prompt_configs = {
+            'document': {
+                'prompt': '<image>\n<|grounding|>Convert the document to markdown. ',
+                'output_file': 'result.mmd'
+            },
+            'ocr': {
+                'prompt': '<image>\n<|grounding|>OCR this image. ',
+                'output_file': 'result.txt'
+            },
+            'free': {
+                'prompt': '<image>\nFree OCR. ',
+                'output_file': 'result.txt'
+            },
+            'figure': {
+                'prompt': '<image>\nParse the figure. ',
+                'output_file': 'result.txt'
+            },
+            'describe': {
+                'prompt': '<image>\nDescribe this image in detail. ',
+                'output_file': 'result.txt'
+            }
+        }
+        config = prompt_configs.get(prompt_type, prompt_configs['document'])
+
+        os.makedirs(OUTPUT_DIR, exist_ok=True)
+        batch_results = []
+
+        for idx, image_file in enumerate(images):
+            with tempfile.NamedTemporaryFile(delete=False, suffix='.jpg') as tmp_file:
+                image_file.save(tmp_file.name)
+                temp_image_path = tmp_file.name
+
+            item_dir = os.path.join(OUTPUT_DIR, f'batch_{idx+1}')
+            os.makedirs(item_dir, exist_ok=True)
+
+            update_progress('processing', 'ocr', f'Processing image {idx+1}/{len(images)}', int((idx/ max(1,len(images))) * 50))
+
+            model.infer(
+                tokenizer,
+                prompt=config['prompt'],
+                image_file=temp_image_path,
+                output_path=item_dir,
+                base_size=base_size,
+                image_size=image_size,
+                crop_mode=crop_mode,
+                save_results=True,
+                test_compress=True
+            )
+
+            result_filepath = os.path.join(item_dir, config['output_file'])
+            text = None
+            if os.path.exists(result_filepath):
+                with open(result_filepath, 'r', encoding='utf-8') as f:
+                    text = f.read()
+            else:
+                for filename in os.listdir(item_dir):
+                    if filename.endswith(('.txt', '.mmd', '.md')):
+                        with open(os.path.join(item_dir, filename), 'r', encoding='utf-8') as f:
+                            text = f.read()
+                        break
+
+            boxes_image_rel = None
+            boxes_image_path = os.path.join(item_dir, 'result_with_boxes.jpg')
+            if os.path.exists(boxes_image_path):
+                boxes_image_rel = f'batch_{idx+1}/result_with_boxes.jpg'
+
+            batch_results.append({
+                'index': idx + 1,
+                'text': text or '',
+                'boxes_image_path': boxes_image_rel
+            })
+
+            if os.path.exists(temp_image_path):
+                os.remove(temp_image_path)
+
+        update_progress('idle', '', '', 0, 0)
+
+        combined_text = '\n\n'.join([item['text'] for item in batch_results])
+        return jsonify({'status': 'success', 'prompt_type': prompt_type, 'items': batch_results, 'combined_text': combined_text})
+
+    except Exception as e:
+        logger.error(f"Error during batch OCR: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'status': 'error', 'message': str(e)}), 500
 
 if __name__ == '__main__':
     # Load model on startup
