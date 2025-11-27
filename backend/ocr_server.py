@@ -162,22 +162,42 @@ def load_model_background():
 
         # Try to use flash attention if available, otherwise fallback
         try:
-            model = AutoModel.from_pretrained(
-                MODEL_NAME,
-                _attn_implementation='flash_attention_2',
-                trust_remote_code=True,
-                use_safetensors=True,
-                cache_dir=MODEL_CACHE_DIR
-            )
-            logger.info("Using flash attention 2")
+            # 首先检查transformers版本是否支持flash_attention_2
+            import transformers
+            transformers_version = transformers.__version__
+            logger.info(f"Transformers version: {transformers_version}")
+
+            try:
+                import transformers.models.llama.modeling_llama as modeling_llama
+                if not hasattr(modeling_llama, 'LlamaFlashAttention2'):
+                    class LlamaFlashAttention2:
+                        pass
+                    modeling_llama.LlamaFlashAttention2 = LlamaFlashAttention2
+            except Exception as _e:
+                logger.warning(f"Flash attention shim failed: {_e}")
+
+            # 尝试使用flash attention 2
+            try:
+                model = AutoModel.from_pretrained(
+                    MODEL_NAME,
+                    _attn_implementation='flash_attention_2',
+                    trust_remote_code=True,
+                    use_safetensors=True,
+                    cache_dir=MODEL_CACHE_DIR
+                )
+                logger.info("Using flash attention 2")
+            except Exception as e:
+                logger.warning(f"Flash attention 2 not supported with current transformers version: {e}")
+                logger.info("Falling back to default attention implementation")
+                model = AutoModel.from_pretrained(
+                    MODEL_NAME,
+                    trust_remote_code=True,
+                    use_safetensors=True,
+                    cache_dir=MODEL_CACHE_DIR
+                )
         except Exception as e:
-            logger.warning(f"Flash attention not available: {e}, using default attention")
-            model = AutoModel.from_pretrained(
-                MODEL_NAME,
-                trust_remote_code=True,
-                use_safetensors=True,
-                cache_dir=MODEL_CACHE_DIR
-            )
+            logger.warning(f"Error loading model: {e}")
+            raise e
 
         # Stop download monitor and wait for it to finish
         download_monitor_active[0] = False
@@ -207,6 +227,9 @@ def load_model_background():
         update_progress('error', 'failed', str(e), 0)
         import traceback
         traceback.print_exc()
+        # 确保在错误情况下重置模型和分词器
+        model = None
+        tokenizer = None
 
 def load_model():
     """Load the DeepSeek OCR model and tokenizer
@@ -228,14 +251,26 @@ def load_model():
     # Check if already loading
     if loading_thread is not None and loading_thread.is_alive():
         logger.info("Model loading already in progress")
-        return True
+        # 等待加载完成
+        loading_thread.join(timeout=300)  # 等待最多5分钟
+        if model is not None and tokenizer is not None:
+            return True
+        else:
+            logger.error("Model loading timed out or failed")
+            return False
 
     # Start loading in background thread
     loading_thread = Thread(target=load_model_background)
     loading_thread.daemon = True
     loading_thread.start()
 
-    return True
+    # 等待加载完成
+    loading_thread.join(timeout=300)  # 等待最多5分钟
+    if model is not None and tokenizer is not None:
+        return True
+    else:
+        logger.error("Model loading failed")
+        return False
 
 @app.route('/health', methods=['GET'])
 def health_check():
@@ -282,7 +317,13 @@ def perform_ocr():
         if model is None or tokenizer is None:
             logger.info("Model not loaded, loading now...")
             if not load_model():
-                return jsonify({'status': 'error', 'message': 'Failed to load model'}), 500
+                logger.error("Failed to load model")
+                return jsonify({'status': 'error', 'message': 'Failed to load model. Please check logs for details.'}), 500
+
+        # 再次检查模型是否已成功加载
+        if model is None or tokenizer is None:
+            logger.error("Model is still None after loading attempt")
+            return jsonify({'status': 'error', 'message': 'Model loading failed. Please restart the application.'}), 500
 
         # Get image from request
         if 'image' not in request.files:
@@ -486,7 +527,13 @@ def perform_ocr_pdf():
         if model is None or tokenizer is None:
             logger.info("Model not loaded, loading now...")
             if not load_model():
-                return jsonify({'status': 'error', 'message': 'Failed to load model'}), 500
+                logger.error("Failed to load model")
+                return jsonify({'status': 'error', 'message': 'Failed to load model. Please check logs for details.'}), 500
+
+        # 再次检查模型是否已成功加载
+        if model is None or tokenizer is None:
+            logger.error("Model is still None after loading attempt")
+            return jsonify({'status': 'error', 'message': 'Model loading failed. Please restart the application.'}), 500
 
         if 'pdf' not in request.files:
             return jsonify({'status': 'error', 'message': 'No PDF provided'}), 400
@@ -533,53 +580,71 @@ def perform_ocr_pdf():
         for page_index in range(len(doc)):
             page = doc.load_page(page_index)
             pix = page.get_pixmap(dpi=144)
-            with tempfile.NamedTemporaryFile(delete=False, suffix='.jpg') as tmp_img:
-                pix.save(tmp_img.name)
-                temp_image_path = tmp_img.name
 
+            # 使用更健壮的临时文件处理方式，特别针对Windows系统
             page_dir = os.path.join(OUTPUT_DIR, f'pdf_page_{page_index+1}')
             os.makedirs(page_dir, exist_ok=True)
 
-            update_progress('processing', 'ocr', f'Processing PDF page {page_index+1}/{len(doc)}', int( (page_index/ max(1,len(doc))) * 50))
+            # 直接在页面目录中创建唯一临时图像文件，避免与已存在文件冲突
+            import uuid
+            temp_image_path = os.path.join(page_dir, f"temp_page_{page_index+1}_{uuid.uuid4().hex}.jpg")
 
-            model.infer(
-                tokenizer,
-                prompt=config['prompt'],
-                image_file=temp_image_path,
-                output_path=page_dir,
-                base_size=base_size,
-                image_size=image_size,
-                crop_mode=crop_mode,
-                save_results=True,
-                test_compress=True
-            )
+            try:
+                # 保存图像到我们的临时位置
+                pix.save(temp_image_path)
 
-            result_filepath = os.path.join(page_dir, config['output_file'])
-            text = None
-            if os.path.exists(result_filepath):
-                with open(result_filepath, 'r', encoding='utf-8') as f:
-                    text = f.read()
-            else:
-                for filename in os.listdir(page_dir):
-                    if filename.endswith(('.txt', '.mmd', '.md')):
-                        with open(os.path.join(page_dir, filename), 'r', encoding='utf-8') as f:
-                            text = f.read()
-                        break
+                update_progress('processing', 'ocr', f'Processing PDF page {page_index+1}/{len(doc)}', int( (page_index/ max(1,len(doc))) * 50))
 
-            boxes_image_rel = None
-            boxes_image_path = os.path.join(page_dir, 'result_with_boxes.jpg')
-            if os.path.exists(boxes_image_path):
-                boxes_image_rel = f'pdf_page_{page_index+1}/result_with_boxes.jpg'
+                model.infer(
+                    tokenizer,
+                    prompt=config['prompt'],
+                    image_file=temp_image_path,
+                    output_path=page_dir,
+                    base_size=base_size,
+                    image_size=image_size,
+                    crop_mode=crop_mode,
+                    save_results=True,
+                    test_compress=True
+                )
 
-            pages_output.append({
-                'page': page_index + 1,
-                'text': text or '',
-                'boxes_image_path': boxes_image_rel
-            })
-            combined_texts.append(text or '')
+                result_filepath = os.path.join(page_dir, config['output_file'])
+                text = None
+                if os.path.exists(result_filepath):
+                    with open(result_filepath, 'r', encoding='utf-8') as f:
+                        text = f.read()
+                else:
+                    for filename in os.listdir(page_dir):
+                        if filename.endswith(('.txt', '.mmd', '.md')):
+                            with open(os.path.join(page_dir, filename), 'r', encoding='utf-8') as f:
+                                text = f.read()
+                            break
 
-            if os.path.exists(temp_image_path):
-                os.remove(temp_image_path)
+                boxes_image_rel = None
+                boxes_image_path = os.path.join(page_dir, 'result_with_boxes.jpg')
+                if os.path.exists(boxes_image_path):
+                    boxes_image_rel = f'pdf_page_{page_index+1}/result_with_boxes.jpg'
+
+                pages_output.append({
+                    'page': page_index + 1,
+                    'text': text or '',
+                    'boxes_image_path': boxes_image_rel
+                })
+                combined_texts.append(text or '')
+            finally:
+                # 尝试删除临时图像文件，但不让错误中断处理
+                if temp_image_path and os.path.exists(temp_image_path):
+                    try:
+                        os.remove(temp_image_path)
+                    except (PermissionError, OSError) as e:
+                        logger.warning(f"Could not remove temporary file {temp_image_path}: {e}")
+                        # 在Windows上，有时文件会被锁定，我们稍后再尝试删除
+                        import time
+                        time.sleep(0.5)  # 等待500ms
+                        try:
+                            os.remove(temp_image_path)
+                        except (PermissionError, OSError):
+                            # 如果仍然失败，记录但继续处理
+                            logger.warning(f"Still could not remove temporary file {temp_image_path} after retry")
 
         doc.close()
         if os.path.exists(temp_pdf_path):
