@@ -417,7 +417,7 @@ def perform_ocr():
                     try:
                         safe_text = text.encode(self.original.encoding or 'utf-8', errors='replace').decode(self.original.encoding or 'utf-8')
                         self.original.write(safe_text)
-                    except:
+                    except Exception:
                         # If all else fails, just skip writing to original stdout
                         pass
 
