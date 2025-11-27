@@ -14,11 +14,11 @@ from pathlib import Path
 USE_UNICODE = True
 if sys.platform == "win32":
     try:
-        # Try to set console to UTF-8 mode
-        import codecs
-        sys.stdout = codecs.getwriter('utf-8')(sys.stdout.buffer, 'strict')
-        sys.stderr = codecs.getwriter('utf-8')(sys.stderr.buffer, 'strict')
-    except:
+        # Try to set console to UTF-8 mode with proper line buffering
+        import io
+        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace', line_buffering=True)
+        sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace', line_buffering=True)
+    except Exception:
         # If UTF-8 fails, use ASCII-safe characters
         USE_UNICODE = False
 
