@@ -10,28 +10,16 @@ import subprocess
 import shutil
 from pathlib import Path
 
-# Set UTF-8 encoding for console output (fixes Unicode checkmarks on Windows)
-USE_UNICODE = True
-if sys.platform == "win32":
-    try:
-        # Try to set console to UTF-8 mode with proper line buffering
-        import io
-        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace', line_buffering=True)
-        sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace', line_buffering=True)
-    except Exception:
-        # If UTF-8 fails, use ASCII-safe characters
-        USE_UNICODE = False
-
-# Define symbols that work with or without UTF-8
-CHECK = "√" if USE_UNICODE else "+"
-CROSS = "✗" if USE_UNICODE else "X"
+# Use ASCII-safe symbols for Windows compatibility (avoids encoding issues)
+CHECK = "+"
+CROSS = "X"
 
 def print_header():
     """Print the application header."""
-    print("=" * 38)
-    print("DeepSeek OCR Client")
-    print("=" * 38)
-    print()
+    print("=" * 38, flush=True)
+    print("DeepSeek OCR Client", flush=True)
+    print("=" * 38, flush=True)
+    print(flush=True)
 
 def check_command(command):
     """Check if a command exists in PATH."""
@@ -119,7 +107,7 @@ def find_compatible_python():
 
 def check_prerequisites():
     """Check if Node.js and Python are installed."""
-    print("Checking prerequisites...")
+    print("Checking prerequisites...", flush=True)
 
     # Check Node.js
     if not check_command("node"):
@@ -455,7 +443,7 @@ def main():
     # Store temp dir path for use in pip commands
     os.environ['LOCAL_TEMP_DIR'] = str(python_temp_dir)
 
-    print(f"Using local cache directory: {cache_dir}")
+    print(f"Using local cache directory: {cache_dir}", flush=True)
 
     # Run setup steps
     python_exe = check_prerequisites()
