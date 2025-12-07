@@ -10,7 +10,6 @@ const downloadZipBtn = document.getElementById('download-zip-btn');
 const ocrBtn = document.getElementById('ocr-btn');
 const ocrBtnText = document.getElementById('ocr-btn-text');
 const pdfOcrBtn = document.getElementById('pdf-ocr-btn');
-const batchOcrBtn = document.getElementById('batch-ocr-btn');
 const loadModelBtn = document.getElementById('load-model-btn');
 const copyBtn = document.getElementById('copy-btn');
 const previewSection = document.getElementById('preview-section');
@@ -105,26 +104,31 @@ function setupEventListeners() {
         e.preventDefault();
         dropZone.style.background = '#f8f9ff';
     });
-
-    dropZone.addEventListener('drop', (e) => {
+    dropZone.addEventListener('drop', async (e) => {
         e.preventDefault();
         dropZone.style.background = '#f8f9ff';
 
-        const files = e.dataTransfer.files;
-        if (files.length > 0) {
-            const file = files[0];
-            if (file.type.startsWith('image/')) {
-                loadImage(file.path);
-            } else {
-                showMessage('Please drop an image file', 'error');
-            }
+        const files = Array.from(e.dataTransfer.files).filter(f => f.type.startsWith('image/'));
+
+        if (files.length === 0) {
+            showMessage('Please drop image file(s)', 'error');
+            return;
+        }
+
+        if (files.length === 1) {
+            // Single file - auto OCR
+            await loadImage(files[0].path);
+            performOCR();
+        } else {
+            // Multiple files - batch OCR
+            const filePaths = files.map(f => f.path);
+            await performBatchOCRWithPaths(filePaths);
         }
     });
 
     // OCR
     ocrBtn.addEventListener('click', performOCR);
     pdfOcrBtn.addEventListener('click', performPDFOCR);
-    batchOcrBtn.addEventListener('click', performBatchOCR);
 
     // Load model
     loadModelBtn.addEventListener('click', loadModel);
@@ -154,6 +158,11 @@ function setupEventListeners() {
     });
 
     checkUpdatesBtn.addEventListener('click', checkForUpdates);
+
+    // Engine selection
+    ocrEngine.addEventListener('change', () => {
+        checkServerStatus();
+    });
 }
 
 function getServerUrl() {
@@ -225,10 +234,17 @@ async function checkServerStatus() {
 }
 
 async function selectImage() {
-    const result = await ipcRenderer.invoke('select-image');
+    const result = await ipcRenderer.invoke('select-images');
 
-    if (result.success) {
-        loadImage(result.filePath);
+    if (result.success && result.filePaths && result.filePaths.length > 0) {
+        if (result.filePaths.length === 1) {
+            // Single file - auto OCR
+            await loadImage(result.filePaths[0]);
+            performOCR();
+        } else {
+            // Multiple files - batch OCR direct start
+            await performBatchOCRWithPaths(result.filePaths);
+        }
     }
 }
 
@@ -1099,14 +1115,14 @@ async function performPDFOCR() {
         pdfOcrBtn.disabled = false;
     }
 }
-async function performBatchOCR() {
+async function performBatchOCRWithPaths(imagePaths) {
     if (isProcessing) return;
+    if (!imagePaths || imagePaths.length === 0) return;
 
     try {
         isProcessing = true;
-        batchOcrBtn.disabled = true;
         progressInline.style.display = 'flex';
-        progressStatus.textContent = 'Selecting images...';
+        progressStatus.textContent = `Processing ${imagePaths.length} images...`;
 
         // Clear previous results
         resultsContent.innerHTML = '';
@@ -1119,22 +1135,21 @@ async function performBatchOCR() {
         viewBoxesBtn.style.display = 'none';
         viewTokensBtn.style.display = 'none';
 
-        const sel = await ipcRenderer.invoke('select-images');
-        if (!sel.success) {
-            progressInline.style.display = 'none';
-            batchOcrBtn.disabled = false;
-            return;
-        }
+        // Hide drop zone, show preview section with batch info
+        dropZone.style.display = 'none';
+        previewSection.style.display = 'block';
+        imagePreview.src = imagePaths[0]; // Show first image as preview
 
-        progressStatus.textContent = 'Processing batch...';
+        const currentEngine = ocrEngine ? ocrEngine.value : 'tesseract';
 
         const result = await ipcRenderer.invoke('perform-ocr-batch', {
-            imagePaths: sel.filePaths,
+            imagePaths: imagePaths,
             promptType: promptType.value,
             baseSize: parseInt(baseSize.value),
             imageSize: parseInt(imageSize.value),
             cropMode: cropMode.checked,
-            serverUrl: getServerUrl()
+            serverUrl: getServerUrl(),
+            ocr_engine: currentEngine
         });
 
         progressInline.style.display = 'none';
@@ -1145,7 +1160,7 @@ async function performBatchOCR() {
             displayResults(combinedText, currentPromptType);
             copyBtn.style.display = 'inline-block';
             downloadZipBtn.style.display = currentPromptType === 'document' ? 'inline-block' : 'none';
-            showMessage('Batch OCR completed successfully', 'success');
+            showMessage(`Batch OCR completed - ${imagePaths.length} images processed`, 'success');
         } else {
             resultsContent.innerHTML = `<p class="error">Error: ${result.error}</p>`;
             copyBtn.style.display = 'none';
@@ -1160,7 +1175,6 @@ async function performBatchOCR() {
         showMessage(`Error: ${error.message}`, 'error');
     } finally {
         isProcessing = false;
-        batchOcrBtn.disabled = false;
     }
 }
 async function checkForUpdates() {

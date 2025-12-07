@@ -230,7 +230,7 @@ ipcMain.handle('select-pdf', async () => {
   return { success: false };
 });
 
-ipcMain.handle('perform-ocr-batch', async (event, { imagePaths, promptType, baseSize, imageSize, cropMode, serverUrl }) => {
+ipcMain.handle('perform-ocr-batch', async (event, { imagePaths, promptType, baseSize, imageSize, cropMode, serverUrl, ocr_engine }) => {
   try {
     const FormData = require('form-data');
     const formData = new FormData();
@@ -247,6 +247,7 @@ ipcMain.handle('perform-ocr-batch', async (event, { imagePaths, promptType, base
     formData.append('base_size', baseSize || 1024);
     formData.append('image_size', imageSize || 640);
     formData.append('crop_mode', cropMode ? 'true' : 'false');
+    formData.append('ocr_engine', ocr_engine || 'tesseract');
 
     const base = serverUrl || PYTHON_SERVER_URL;
     const response = await axios.post(`${base}/ocr_batch`, formData, {
