@@ -22,6 +22,7 @@ A real-time Electron-based desktop GUI for [DeepSeek-OCR](https://github.com/dee
 - Windows 10/11, other OS are experimental
 - Node.js 18+ ([download](https://nodejs.org/))
 - Python 3.12+ ([download](https://www.python.org/))
+- Microsoft Visual C++ Redistributable ([download](https://aka.ms/vs/17/release/vc_redist.x64.exe)) - required for PyTorch
 - NVIDIA GPU with CUDA
 
 ## Quick Start (Windows)
