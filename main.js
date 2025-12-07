@@ -168,10 +168,10 @@ ipcMain.handle('check-server-status', async (event, { serverUrl }) => {
   }
 });
 
-ipcMain.handle('load-model', async (event, { serverUrl, forceCpu }) => {
+ipcMain.handle('load-model', async (event, { serverUrl, ocr_engine }) => {
   try {
     const base = serverUrl || PYTHON_SERVER_URL;
-    const response = await axios.post(`${base}/load_model`, { force_cpu: !!forceCpu });
+    const response = await axios.post(`${base}/load_model`, { ocr_engine: ocr_engine || 'tesseract' });
     return { success: true, data: response.data };
   } catch (error) {
     return { success: false, error: error.message };

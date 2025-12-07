@@ -39,7 +39,7 @@ const promptType = document.getElementById('prompt-type');
 const baseSize = document.getElementById('base-size');
 const imageSize = document.getElementById('image-size');
 const cropMode = document.getElementById('crop-mode');
-const forceCpu = document.getElementById('force-cpu');
+const ocrEngine = document.getElementById('ocr-engine');
 
 // Constants
 const DEEPSEEK_COORD_MAX = 999;
@@ -174,8 +174,18 @@ async function checkServerStatus() {
             modelStatus.className = `status-value ${modelLoaded ? 'success' : 'warning'}`;
 
             const gpuAvailable = result.data.gpu_available;
-            gpuStatus.textContent = gpuAvailable ? 'Available' : 'CPU Only';
-            gpuStatus.className = `status-value ${gpuAvailable ? 'success' : 'warning'}`;
+            const tesseractAvailable = result.data.tesseract_available;
+            const deepseekAvailable = result.data.deepseek_available;
+            const currentEngine = ocrEngine ? ocrEngine.value : 'tesseract';
+
+            // Update GPU status based on engine
+            if (currentEngine === 'tesseract') {
+                gpuStatus.textContent = tesseractAvailable ? 'Tesseract OK' : 'Tesseract Missing';
+                gpuStatus.className = `status-value ${tesseractAvailable ? 'success' : 'error'}`;
+            } else {
+                gpuStatus.textContent = gpuAvailable ? 'GPU Available' : 'No GPU';
+                gpuStatus.className = `status-value ${gpuAvailable ? 'success' : 'error'}`;
+            }
 
             // Update load model button state (but don't change if currently processing)
             if (!isProcessing) {
@@ -677,7 +687,8 @@ async function loadModel() {
         pollInterval = setInterval(pollProgress, 500);
 
         // Trigger model loading
-        const result = await ipcRenderer.invoke('load-model', { serverUrl: getServerUrl(), forceCpu: !!(forceCpu && forceCpu.checked) });
+        const currentEngine = ocrEngine ? ocrEngine.value : 'tesseract';
+        const result = await ipcRenderer.invoke('load-model', { serverUrl: getServerUrl(), ocr_engine: currentEngine });
 
         // Wait for final status
         await new Promise(resolve => {

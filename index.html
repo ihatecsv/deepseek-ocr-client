@@ -90,10 +90,11 @@
                             </div>
 
                             <div class="form-group">
-                                <label>
-                                    <input type="checkbox" id="force-cpu">
-                                    Force CPU
-                                </label>
+                                <label for="ocr-engine">Engine:</label>
+                                <select id="ocr-engine">
+                                    <option value="tesseract">Tesseract (CPU)</option>
+                                    <option value="deepseek">DeepSeek (GPU)</option>
+                                </select>
                             </div>
                         </div>
 

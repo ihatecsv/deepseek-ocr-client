@@ -2,18 +2,52 @@
 """
 DeepSeek OCR Backend Server
 Handles model loading, caching, and OCR inference
+Supports both DeepSeek-OCR (GPU) and Tesseract (CPU) engines
 """
 import os
 import sys
 import logging
 from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
-import torch
-from transformers import AutoModel, AutoTokenizer
 import tempfile
 import time
 from threading import Thread, Lock
 import fitz
+
+# Conditional imports for GPU-based OCR
+DEEPSEEK_AVAILABLE = False
+torch = None
+AutoModel = None
+AutoTokenizer = None
+
+try:
+    import torch as _torch
+    from transformers import AutoModel as _AutoModel, AutoTokenizer as _AutoTokenizer
+    torch = _torch
+    AutoModel = _AutoModel
+    AutoTokenizer = _AutoTokenizer
+    DEEPSEEK_AVAILABLE = True
+except ImportError as e:
+    logging.warning(f"PyTorch/Transformers not available: {e}")
+    logging.info("DeepSeek-OCR will be disabled. Tesseract OCR is still available.")
+
+# Import Tesseract OCR module
+try:
+    # When running from the backend directory
+    from tesseract_ocr import (
+        check_tesseract_availability,
+        perform_tesseract_ocr,
+        get_available_languages,
+        TESSERACT_AVAILABLE
+    )
+except ImportError:
+    # When running from the project root
+    from backend.tesseract_ocr import (
+        check_tesseract_availability,
+        perform_tesseract_ocr,
+        get_available_languages,
+        TESSERACT_AVAILABLE
+    )
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -29,6 +63,9 @@ CORS(app)
 model = None
 tokenizer = None
 MODEL_NAME = 'deepseek-ai/DeepSeek-OCR'
+
+# OCR engine preference: 'tesseract' | 'deepseek'
+ocr_engine_preference = 'tesseract'
 
 # Use local cache directory relative to the app
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -275,10 +312,17 @@ def load_model():
 @app.route('/health', methods=['GET'])
 def health_check():
     """Health check endpoint"""
+    tesseract_info = check_tesseract_availability()
+    gpu_available = torch.cuda.is_available() if torch else False
+    
     return jsonify({
         'status': 'ok',
         'model_loaded': model is not None,
-        'gpu_available': torch.cuda.is_available()
+        'gpu_available': gpu_available,
+        'deepseek_available': DEEPSEEK_AVAILABLE,
+        'tesseract_available': tesseract_info.get('available', False),
+        'tesseract_info': tesseract_info,
+        'ocr_engine': ocr_engine_preference
     })
 
 @app.route('/progress', methods=['GET'])
@@ -291,51 +335,118 @@ def get_progress():
 @app.route('/load_model', methods=['POST'])
 def load_model_endpoint():
     """Endpoint to trigger model loading"""
-    global device_preference
+    global device_preference, ocr_engine_preference
+    
     try:
         data = request.get_json(silent=True) or {}
+        
+        # Handle OCR engine preference
+        if 'ocr_engine' in data:
+            ocr_engine_preference = data['ocr_engine']
+            logger.info(f"OCR engine set to: {ocr_engine_preference}")
+        
+        # If Tesseract mode, no model loading needed
+        if ocr_engine_preference == 'tesseract':
+            tesseract_info = check_tesseract_availability()
+            if tesseract_info.get('available'):
+                return jsonify({
+                    'status': 'success',
+                    'message': f"Tesseract OCR ready (v{tesseract_info.get('version', 'unknown')})",
+                    'engine': 'tesseract'
+                })
+            else:
+                return jsonify({
+                    'status': 'error',
+                    'message': tesseract_info.get('error', 'Tesseract not available')
+                }), 500
+        
+        # DeepSeek model loading
+        if not DEEPSEEK_AVAILABLE:
+            return jsonify({
+                'status': 'error',
+                'message': 'DeepSeek-OCR requires PyTorch and CUDA. Please install them or use Tesseract mode.'
+            }), 500
+        
         if 'force_cpu' in data and data['force_cpu']:
             device_preference = 'cpu'
         else:
             device_preference = 'auto'
-    except Exception:
+    except Exception as e:
+        logger.error(f"Error in load_model_endpoint: {e}")
         device_preference = 'auto'
 
     success = load_model()
     if success:
-        return jsonify({'status': 'success', 'message': 'Model loaded successfully'})
+        return jsonify({'status': 'success', 'message': 'Model loaded successfully', 'engine': 'deepseek'})
     else:
         return jsonify({'status': 'error', 'message': 'Failed to load model'}), 500
 
 @app.route('/ocr', methods=['POST'])
 def perform_ocr():
     """Perform OCR on uploaded image"""
-    global model, tokenizer
+    global model, tokenizer, ocr_engine_preference
 
     try:
-        # Check if model is loaded
-        if model is None or tokenizer is None:
-            logger.info("Model not loaded, loading now...")
-            if not load_model():
-                logger.error("Failed to load model")
-                return jsonify({'status': 'error', 'message': 'Failed to load model. Please check logs for details.'}), 500
-
-        # 再次检查模型是否已成功加载
-        if model is None or tokenizer is None:
-            logger.error("Model is still None after loading attempt")
-            return jsonify({'status': 'error', 'message': 'Model loading failed. Please restart the application.'}), 500
-
         # Get image from request
         if 'image' not in request.files:
             return jsonify({'status': 'error', 'message': 'No image provided'}), 400
 
         image_file = request.files['image']
-
+        
+        # Check OCR engine preference from request or use global
+        ocr_engine = request.form.get('ocr_engine', ocr_engine_preference)
+        
         # Get optional parameters
         prompt_type = request.form.get('prompt_type', 'document')
         base_size = int(request.form.get('base_size', 1024))
         image_size = int(request.form.get('image_size', 640))
         crop_mode = request.form.get('crop_mode', 'true').lower() == 'true'
+        
+        # Save image temporarily
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.jpg') as tmp_file:
+            image_file.save(tmp_file.name)
+            temp_image_path = tmp_file.name
+        
+        # Tesseract OCR path
+        if ocr_engine == 'tesseract':
+            logger.info("Using Tesseract OCR engine")
+            os.makedirs(OUTPUT_DIR, exist_ok=True)
+            
+            result = perform_tesseract_ocr(temp_image_path, output_dir=OUTPUT_DIR)
+            
+            # Clean up temp file
+            if os.path.exists(temp_image_path):
+                os.remove(temp_image_path)
+            
+            if result['status'] == 'success':
+                return jsonify(result)
+            else:
+                return jsonify(result), 500
+        
+        # DeepSeek OCR path (requires GPU)
+        if not DEEPSEEK_AVAILABLE:
+            if os.path.exists(temp_image_path):
+                os.remove(temp_image_path)
+            return jsonify({
+                'status': 'error', 
+                'message': 'DeepSeek-OCR requires PyTorch. Please switch to Tesseract mode or install PyTorch.'
+            }), 500
+        
+        # Check if model is loaded
+        if model is None or tokenizer is None:
+            logger.info("Model not loaded, loading now...")
+            if not load_model():
+                logger.error("Failed to load model")
+                if os.path.exists(temp_image_path):
+                    os.remove(temp_image_path)
+                return jsonify({'status': 'error', 'message': 'Failed to load model. Please check logs for details.'}), 500
+
+        # 再次检查模型是否已成功加载
+        if model is None or tokenizer is None:
+            logger.error("Model is still None after loading attempt")
+            if os.path.exists(temp_image_path):
+                os.remove(temp_image_path)
+            return jsonify({'status': 'error', 'message': 'Model loading failed. Please restart the application.'}), 500
 
         # Define prompts and their expected output file extensions
         prompt_configs = {
@@ -366,11 +477,6 @@ def perform_ocr():
         expected_output_file = config['output_file']
 
         logger.info(f"Processing OCR request with prompt type: {prompt_type}")
-
-        # Save image temporarily
-        with tempfile.NamedTemporaryFile(delete=False, suffix='.jpg') as tmp_file:
-            image_file.save(tmp_file.name)
-            temp_image_path = tmp_file.name
 
         # Create output directory if it doesn't exist
         os.makedirs(OUTPUT_DIR, exist_ok=True)
@@ -409,27 +515,16 @@ def perform_ocr():
                 self.accumulated_text += text
 
                 # Count === markers to determine sections
-                # Section 0-1: Before first ===
-                # Section 1-2: BASE/PATCHES info
-                # Section 2-3: Token generation (what we want)
-                # Section 3+: Compression stats
-                self.section_count = self.accumulated_text.count('=' * 20)  # Count long === lines
+                self.section_count = self.accumulated_text.count('=' * 20)
 
                 # Extract and process token section (between 2nd and 3rd ===)
                 if self.section_count >= 2:
-                    # Find the token section
                     parts = self.accumulated_text.split('=' * 20)
                     if len(parts) >= 3:
-                        # Token section is between 2nd and 3rd === markers
                         token_section = parts[2]
-
-                        # Store the raw token section, removing any leading/trailing = and whitespace
                         raw_token_text = token_section.strip().lstrip('=').strip()
-
-                        # Count characters in the raw token text
                         char_count[0] = len(raw_token_text)
 
-                        # Update progress with the raw token stream (no artificial newlines)
                         if char_count[0] > 0:
                             update_progress('processing', 'ocr', 'Generating OCR...', 50, char_count[0], raw_token_text)
 
@@ -468,7 +563,6 @@ def perform_ocr():
             with open(result_filepath, 'r', encoding='utf-8') as f:
                 result_text = f.read()
             logger.info(f"Successfully read result from: {expected_output_file}")
-            logger.info(f"Result text (first 200 chars): {result_text[:200]}")
         else:
             # Fallback: try to find any text-like file
             logger.warning(f"Expected file '{expected_output_file}' not found, searching for alternatives")
@@ -494,7 +588,7 @@ def perform_ocr():
         if os.path.exists(temp_image_path):
             os.remove(temp_image_path)
 
-        # Extract raw token text from the stream (between 2nd and 3rd === markers)
+        # Extract raw token text from the stream
         raw_token_text = None
         if char_stream.section_count >= 2:
             parts = char_stream.accumulated_text.split('=' * 20)
@@ -521,28 +615,100 @@ def perform_ocr():
 @app.route('/ocr_pdf', methods=['POST'])
 def perform_ocr_pdf():
     """Perform OCR on uploaded PDF (per-page)"""
-    global model, tokenizer
+    global model, tokenizer, ocr_engine_preference
 
     try:
-        if model is None or tokenizer is None:
-            logger.info("Model not loaded, loading now...")
-            if not load_model():
-                logger.error("Failed to load model")
-                return jsonify({'status': 'error', 'message': 'Failed to load model. Please check logs for details.'}), 500
-
-        # 再次检查模型是否已成功加载
-        if model is None or tokenizer is None:
-            logger.error("Model is still None after loading attempt")
-            return jsonify({'status': 'error', 'message': 'Model loading failed. Please restart the application.'}), 500
-
         if 'pdf' not in request.files:
             return jsonify({'status': 'error', 'message': 'No PDF provided'}), 400
 
         pdf_file = request.files['pdf']
+        ocr_engine = request.form.get('ocr_engine', ocr_engine_preference)
         prompt_type = request.form.get('prompt_type', 'document')
         base_size = int(request.form.get('base_size', 1024))
         image_size = int(request.form.get('image_size', 640))
         crop_mode = request.form.get('crop_mode', 'true').lower() == 'true'
+
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp_pdf:
+            pdf_file.save(tmp_pdf.name)
+            temp_pdf_path = tmp_pdf.name
+
+        doc = fitz.open(temp_pdf_path)
+        os.makedirs(OUTPUT_DIR, exist_ok=True)
+        pages_output = []
+        combined_texts = []
+
+        # Tesseract OCR path for PDF
+        if ocr_engine == 'tesseract':
+            logger.info("Using Tesseract OCR engine for PDF")
+            
+            for page_index in range(len(doc)):
+                page = doc.load_page(page_index)
+                pix = page.get_pixmap(dpi=144)
+                
+                page_dir = os.path.join(OUTPUT_DIR, f'pdf_page_{page_index+1}')
+                os.makedirs(page_dir, exist_ok=True)
+                
+                import uuid
+                temp_image_path = os.path.join(page_dir, f"temp_page_{page_index+1}_{uuid.uuid4().hex}.jpg")
+                
+                try:
+                    pix.save(temp_image_path)
+                    update_progress('processing', 'ocr', f'Processing PDF page {page_index+1}/{len(doc)}', int((page_index / max(1, len(doc))) * 100))
+                    
+                    result = perform_tesseract_ocr(temp_image_path, output_dir=page_dir)
+                    text = result.get('result', '')
+                    
+                    pages_output.append({
+                        'page': page_index + 1,
+                        'text': text,
+                        'boxes_image_path': None
+                    })
+                    combined_texts.append(text)
+                finally:
+                    if temp_image_path and os.path.exists(temp_image_path):
+                        try:
+                            os.remove(temp_image_path)
+                        except (PermissionError, OSError):
+                            pass
+            
+            doc.close()
+            if os.path.exists(temp_pdf_path):
+                os.remove(temp_pdf_path)
+            
+            update_progress('idle', '', '', 0, 0)
+            
+            return jsonify({
+                'status': 'success',
+                'prompt_type': prompt_type,
+                'pages': pages_output,
+                'combined_text': '\n\n'.join(combined_texts)
+            })
+
+        # DeepSeek OCR path (requires GPU)
+        if not DEEPSEEK_AVAILABLE:
+            doc.close()
+            if os.path.exists(temp_pdf_path):
+                os.remove(temp_pdf_path)
+            return jsonify({
+                'status': 'error',
+                'message': 'DeepSeek-OCR requires PyTorch. Please switch to Tesseract mode or install PyTorch.'
+            }), 500
+
+        if model is None or tokenizer is None:
+            logger.info("Model not loaded, loading now...")
+            if not load_model():
+                logger.error("Failed to load model")
+                doc.close()
+                if os.path.exists(temp_pdf_path):
+                    os.remove(temp_pdf_path)
+                return jsonify({'status': 'error', 'message': 'Failed to load model. Please check logs for details.'}), 500
+
+        if model is None or tokenizer is None:
+            logger.error("Model is still None after loading attempt")
+            doc.close()
+            if os.path.exists(temp_pdf_path):
+                os.remove(temp_pdf_path)
+            return jsonify({'status': 'error', 'message': 'Model loading failed. Please restart the application.'}), 500
 
         prompt_configs = {
             'document': {
@@ -567,15 +733,6 @@ def perform_ocr_pdf():
             }
         }
         config = prompt_configs.get(prompt_type, prompt_configs['document'])
-
-        with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp_pdf:
-            pdf_file.save(tmp_pdf.name)
-            temp_pdf_path = tmp_pdf.name
-
-        doc = fitz.open(temp_pdf_path)
-        os.makedirs(OUTPUT_DIR, exist_ok=True)
-        pages_output = []
-        combined_texts = []
 
         for page_index in range(len(doc)):
             page = doc.load_page(page_index)
