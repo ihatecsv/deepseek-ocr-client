@@ -22,6 +22,12 @@ const progressStatus = document.getElementById('progress-status');
 const serverUrlInput = document.getElementById('server-url');
 const checkUpdatesBtn = document.getElementById('check-updates-btn');
 
+// TTS elements
+const ttsControls = document.getElementById('tts-controls');
+const voiceSelect = document.getElementById('voice-select');
+const readAloudBtn = document.getElementById('read-aloud-btn');
+const stopReadBtn = document.getElementById('stop-read-btn');
+
 // Lightbox elements
 const lightbox = document.getElementById('lightbox');
 const lightboxImage = document.getElementById('lightbox-image');
@@ -77,6 +83,7 @@ window.addEventListener('DOMContentLoaded', () => {
 
     checkServerStatus();
     setupEventListeners();
+    setupTTS();
     setInterval(checkServerStatus, 5000);
 });
 
@@ -260,7 +267,9 @@ async function loadImage(filePath) {
     resultsContent.innerHTML = '';
     progressInline.style.display = 'none';
     copyBtn.style.display = 'none';
+    copyBtn.style.display = 'none';
     downloadZipBtn.style.display = 'none';
+    if (ttsControls) ttsControls.style.display = 'none';
     viewBoxesBtn.style.display = 'none';
     viewTokensBtn.style.display = 'none';
 
@@ -964,6 +973,34 @@ function displayResults(result, promptType) {
     } else {
         resultsContent.textContent = formattedResult;
     }
+
+    // Show TTS controls
+    if (formattedResult && ttsControls) {
+        ttsControls.style.display = 'flex';
+        readAloudBtn.style.display = 'inline-block';
+        stopReadBtn.style.display = 'none';
+        if (speechSynthesis.speaking) speechSynthesis.cancel();
+
+        // Auto-select voice based on content
+        autoSelectVoice(formattedResult);
+    }
+}
+
+function autoSelectVoice(text) {
+    if (!text || !voiceSelect) return;
+
+    // Check for Arabic content
+    const hasArabic = /[\u0600-\u06FF]/.test(text);
+
+    if (hasArabic) {
+        const voices = window.speechSynthesis.getVoices();
+        // Look for 'ar' in lang code (e.g., 'ar-SA', 'ar-EG')
+        const arabicIndex = voices.findIndex(v => v.lang.toLowerCase().includes('ar-'));
+
+        if (arabicIndex !== -1) {
+            voiceSelect.value = arabicIndex;
+        }
+    }
 }
 
 function copyResults() {
@@ -1192,5 +1229,91 @@ async function checkForUpdates() {
         }
     } catch (e) {
         showMessage(`Update check error: ${e.message}`, 'error');
+    }
+}
+
+function setupTTS() {
+    function cleanTextForTTS(text) {
+        if (!text) return '';
+        return text
+            .replace(/!\[.*?\]\(.*?\)/g, '')
+            .replace(/\[([^\]]+)\]\(.*?\)/g, '$1')
+            .replace(/^#+\s/gm, '')
+            .replace(/(\*\*|__)(.*?)\1/g, '$2')
+            .replace(/(\*|_)(.*?)\1/g, '$2')
+            .replace(/`{3}[\s\S]*?`{3}/g, '')
+            .replace(/`(.+?)`/g, '$1')
+            .replace(/^>\s/gm, '')
+            .replace(/^-{3,}$/gm, '')
+            .replace(/\.\.\./g, '.')
+            .replace(/\.\s*\./g, '.')
+            .replace(/\s+/g, ' ')
+            .trim();
+    }
+    function populateVoices() {
+        if (!voiceSelect) return;
+        const voices = window.speechSynthesis.getVoices();
+        voiceSelect.innerHTML = '<option value="">Default Voice</option>';
+        voices.forEach((voice, index) => {
+            const option = document.createElement('option');
+            option.textContent = `${voice.name} (${voice.lang})`;
+            option.value = index;
+            voiceSelect.appendChild(option);
+        });
+    }
+
+    populateVoices();
+    if (window.speechSynthesis && window.speechSynthesis.onvoiceschanged !== undefined) {
+        window.speechSynthesis.onvoiceschanged = populateVoices;
+    }
+
+    if (readAloudBtn) {
+        readAloudBtn.addEventListener('click', () => {
+            if (window.speechSynthesis.speaking) {
+                window.speechSynthesis.cancel();
+            }
+
+            // Get text to speak
+            let textToRead = currentResultText;
+            if (!textToRead && resultsContent) {
+                textToRead = resultsContent.innerText;
+            }
+
+            if (!textToRead) return;
+            textToRead = cleanTextForTTS(textToRead);
+
+            const utterance = new SpeechSynthesisUtterance(textToRead);
+
+            const selectedVoiceIndex = voiceSelect.value;
+            if (selectedVoiceIndex) {
+                utterance.voice = window.speechSynthesis.getVoices()[selectedVoiceIndex];
+            }
+
+            utterance.onstart = () => {
+                readAloudBtn.style.display = 'none';
+                stopReadBtn.style.display = 'inline-block';
+            };
+
+            utterance.onend = () => {
+                readAloudBtn.style.display = 'inline-block';
+                stopReadBtn.style.display = 'none';
+            };
+
+            utterance.onerror = (e) => {
+                console.error('TTS Error:', e);
+                readAloudBtn.style.display = 'inline-block';
+                stopReadBtn.style.display = 'none';
+            };
+
+            window.speechSynthesis.speak(utterance);
+        });
+    }
+
+    if (stopReadBtn) {
+        stopReadBtn.addEventListener('click', () => {
+            window.speechSynthesis.cancel();
+            readAloudBtn.style.display = 'inline-block';
+            stopReadBtn.style.display = 'none';
+        });
     }
 }

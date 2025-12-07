@@ -737,3 +737,28 @@ main {
     margin: 1em 0;
     box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
 }
+
+/* TTS Controls */
+.tts-controls {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-right: 10px;
+    padding-right: 10px;
+    border-right: 1px solid #ddd;
+}
+
+.select-small {
+    padding: 6px 8px;
+    border: 1px solid #ddd;
+    border-radius: 4px;
+    font-size: 12px;
+    max-width: 150px;
+    cursor: pointer;
+    background: white;
+}
+
+.select-small:focus {
+    outline: none;
+    border-color: #4c51bf;
+}
