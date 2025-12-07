@@ -88,14 +88,31 @@ def perform_tesseract_ocr(image_path, lang='eng+ara', output_dir=None):
         }
     
     try:
+        # Check available languages and adjust if needed
+        available_langs = get_available_languages()
+        requested_langs = lang.split('+')
+        valid_langs = [l for l in requested_langs if l in available_langs]
+        
+        if not valid_langs:
+            valid_langs = ['eng'] if 'eng' in available_langs else available_langs[:1]
+            logger.warning(f"Requested languages {requested_langs} not available. Using: {valid_langs}")
+        
+        # Check if Arabic was requested but not available
+        if 'ara' in requested_langs and 'ara' not in available_langs:
+            logger.warning("Arabic (ara) language pack not installed in Tesseract!")
+            logger.warning("To install: Download ara.traineddata from https://github.com/tesseract-ocr/tessdata")
+            logger.warning("Place it in Tesseract's tessdata folder (e.g., C:\\Program Files\\Tesseract-OCR\\tessdata)")
+        
+        final_lang = '+'.join(valid_langs)
+        
         # Open image
         image = Image.open(image_path)
         
         # Perform OCR
-        logger.info(f"Running Tesseract OCR on {image_path} with lang={lang}")
+        logger.info(f"Running Tesseract OCR on {image_path} with lang={final_lang}")
         
         # Get text with detailed data
-        text = pytesseract.image_to_string(image, lang=lang)
+        text = pytesseract.image_to_string(image, lang=final_lang)
         
         # Save result if output directory provided
         if output_dir:
@@ -105,12 +122,19 @@ def perform_tesseract_ocr(image_path, lang='eng+ara', output_dir=None):
                 f.write(text)
             logger.info(f"Saved OCR result to {result_path}")
         
+        # Add warning if Arabic wasn't available
+        warning = None
+        if 'ara' in requested_langs and 'ara' not in available_langs:
+            warning = "Arabic language pack not installed. Install ara.traineddata for Arabic OCR."
+        
         return {
             'status': 'success',
             'result': text,
             'prompt_type': 'tesseract',
             'raw_tokens': None,
-            'boxes_image_path': None
+            'boxes_image_path': None,
+            'warning': warning,
+            'lang_used': final_lang
         }
         
     except Exception as e:
