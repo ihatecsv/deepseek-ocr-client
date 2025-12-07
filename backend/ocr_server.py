@@ -842,22 +842,64 @@ def serve_output_file(filename):
 @app.route('/ocr_batch', methods=['POST'])
 def perform_ocr_batch():
     """Perform OCR on multiple uploaded images"""
-    global model, tokenizer
+    global model, tokenizer, ocr_engine_preference
 
     try:
-        if model is None or tokenizer is None:
-            logger.info("Model not loaded, loading now...")
-            if not load_model():
-                return jsonify({'status': 'error', 'message': 'Failed to load model'}), 500
-
         images = request.files.getlist('images')
         if not images:
             return jsonify({'status': 'error', 'message': 'No images provided'}), 400
 
+        ocr_engine = request.form.get('ocr_engine', ocr_engine_preference)
         prompt_type = request.form.get('prompt_type', 'document')
         base_size = int(request.form.get('base_size', 1024))
         image_size = int(request.form.get('image_size', 640))
         crop_mode = request.form.get('crop_mode', 'true').lower() == 'true'
+
+        os.makedirs(OUTPUT_DIR, exist_ok=True)
+        batch_results = []
+
+        # Tesseract OCR path for batch
+        if ocr_engine == 'tesseract':
+            logger.info("Using Tesseract OCR engine for batch")
+            
+            for idx, image_file in enumerate(images):
+                with tempfile.NamedTemporaryFile(delete=False, suffix='.jpg') as tmp_file:
+                    image_file.save(tmp_file.name)
+                    temp_image_path = tmp_file.name
+
+                item_dir = os.path.join(OUTPUT_DIR, f'batch_{idx+1}')
+                os.makedirs(item_dir, exist_ok=True)
+
+                update_progress('processing', 'ocr', f'Processing image {idx+1}/{len(images)}', int((idx / max(1, len(images))) * 100))
+
+                result = perform_tesseract_ocr(temp_image_path, output_dir=item_dir)
+                text = result.get('result', '')
+
+                batch_results.append({
+                    'index': idx + 1,
+                    'text': text,
+                    'boxes_image_path': None
+                })
+
+                if os.path.exists(temp_image_path):
+                    os.remove(temp_image_path)
+
+            update_progress('idle', '', '', 0, 0)
+
+            combined_text = '\n\n'.join([item['text'] for item in batch_results])
+            return jsonify({'status': 'success', 'prompt_type': prompt_type, 'items': batch_results, 'combined_text': combined_text})
+
+        # DeepSeek OCR path (requires GPU)
+        if not DEEPSEEK_AVAILABLE:
+            return jsonify({
+                'status': 'error',
+                'message': 'DeepSeek-OCR requires PyTorch. Please switch to Tesseract mode or install PyTorch.'
+            }), 500
+
+        if model is None or tokenizer is None:
+            logger.info("Model not loaded, loading now...")
+            if not load_model():
+                return jsonify({'status': 'error', 'message': 'Failed to load model'}), 500
 
         prompt_configs = {
             'document': {
@@ -882,9 +924,6 @@ def perform_ocr_batch():
             }
         }
         config = prompt_configs.get(prompt_type, prompt_configs['document'])
-
-        os.makedirs(OUTPUT_DIR, exist_ok=True)
-        batch_results = []
 
         for idx, image_file in enumerate(images):
             with tempfile.NamedTemporaryFile(delete=False, suffix='.jpg') as tmp_file:

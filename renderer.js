@@ -1108,6 +1108,17 @@ async function performBatchOCR() {
         progressInline.style.display = 'flex';
         progressStatus.textContent = 'Selecting images...';
 
+        // Clear previous results
+        resultsContent.innerHTML = '';
+        ocrPreviewImage.src = '';
+        ocrBoxesOverlay.innerHTML = '';
+        ocrBoxesOverlay.removeAttribute('viewBox');
+        lastBoxCount = 0;
+        copyBtn.style.display = 'none';
+        downloadZipBtn.style.display = 'none';
+        viewBoxesBtn.style.display = 'none';
+        viewTokensBtn.style.display = 'none';
+
         const sel = await ipcRenderer.invoke('select-images');
         if (!sel.success) {
             progressInline.style.display = 'none';
