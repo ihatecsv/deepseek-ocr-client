@@ -45,6 +45,14 @@ function createWindow() {
     mainWindow.webContents.openDevTools();
   }
 
+  // Allow F12 to open DevTools
+  mainWindow.webContents.on('before-input-event', (event, input) => {
+    if (input.key === 'F12' && input.type === 'keyDown') {
+      mainWindow.webContents.toggleDevTools();
+      event.preventDefault();
+    }
+  });
+
   mainWindow.on('closed', function () {
     mainWindow = null;
   });

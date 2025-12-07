@@ -15,3 +15,6 @@ accelerate
 hf-xet
 PyMuPDF
 pytesseract
+edge-tts
+# TTS (Coqui XTTS) - Optional, for GPU users
+# Uncomment to enable: pip install TTS

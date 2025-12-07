@@ -11,12 +11,18 @@ A real-time Electron-based desktop GUI for [DeepSeek-OCR](https://github.com/dee
 - **Two OCR Engines:**
   - **Tesseract (CPU)** - Works without GPU, good for basic text extraction
   - **DeepSeek (GPU)** - Higher quality, requires NVIDIA GPU with CUDA
+- **AI Text-to-Speech (TTS):**
+  - **Edge TTS (CPU)** - Fast, free, 73+ languages including Arabic
+  - **Coqui XTTS (GPU)** - Natural voice synthesis (optional)
+  - Auto-detects language from OCR results
 
 <img src="docs/images/document.gif" width="1000">
 
 - Click regions to copy 
 - Export results as ZIP with markdown images
 - GPU acceleration (CUDA) for DeepSeek mode
+- PDF OCR support
+- Batch image processing
 
 <img src="docs/images/document2.png" width="1000">
 
@@ -43,6 +49,7 @@ A real-time Electron-based desktop GUI for [DeepSeek-OCR](https://github.com/dee
 4. **Load Model** - Click the "Load Model" button (for DeepSeek) or it will verify Tesseract is installed
 5. **Drop an image** or click the drop zone to select one.
 6. **Run OCR** - Click "Run OCR" to process.
+7. **Read Aloud** - After OCR, click "🔊 Read" to hear the text (select TTS engine from dropdown)
 
 ## Linux/macOS
 
@@ -61,13 +68,26 @@ A real-time Electron-based desktop GUI for [DeepSeek-OCR](https://github.com/dee
 - [ ] Code cleanup needed (quickly put together)
 - [ ] TypeScript
 - [ ] Updater from GitHub releases
-- [ ] PDF support
-- [ ] Batch processing
+- [x] PDF support
+- [x] Batch processing
 - [x] CPU support (Tesseract OCR)
+- [x] Text-to-Speech (AI TTS)
 - [ ] Web version (so you can run the server on a different machine)
 - [ ] Better progress bar algo
 - [ ] ???
 
-## License
+## Troubleshooting
+ 
+ ### "Read" Button Not Working / No Audio
+ 1. **Restart the app**: Ensure back-end dependencies are loaded.
+ 2. **Check Alerts**: The app shows popup alerts for TTS status.
+ 3. **Open DevTools**: Press **F12** to view the console logs for detailed error messages.
+ 4. **Internet Connection**: Edge TTS requires an active internet connection.
+ 
+ ### "Internal Server Error" on TTS
+ - This usually means a dependency is missing.
+ - Try running `pip install edge-tts` manually if issues persist, or ensure `start-client.bat` has run fully.
+ 
+ ## License
 
 MIT

@@ -24,9 +24,10 @@ const checkUpdatesBtn = document.getElementById('check-updates-btn');
 
 // TTS elements
 const ttsControls = document.getElementById('tts-controls');
-const voiceSelect = document.getElementById('voice-select');
+const ttsEngineSelect = document.getElementById('tts-engine');
 const readAloudBtn = document.getElementById('read-aloud-btn');
 const stopReadBtn = document.getElementById('stop-read-btn');
+const ttsAudio = document.getElementById('tts-audio');
 
 // Lightbox elements
 const lightbox = document.getElementById('lightbox');
@@ -976,32 +977,16 @@ function displayResults(result, promptType) {
 
     // Show TTS controls
     if (formattedResult && ttsControls) {
+        console.log('Showing TTS controls');
         ttsControls.style.display = 'flex';
         readAloudBtn.style.display = 'inline-block';
         stopReadBtn.style.display = 'none';
         if (speechSynthesis.speaking) speechSynthesis.cancel();
 
-        // Auto-select voice based on content
-        autoSelectVoice(formattedResult);
     }
 }
 
-function autoSelectVoice(text) {
-    if (!text || !voiceSelect) return;
 
-    // Check for Arabic content
-    const hasArabic = /[\u0600-\u06FF]/.test(text);
-
-    if (hasArabic) {
-        const voices = window.speechSynthesis.getVoices();
-        // Look for 'ar' in lang code (e.g., 'ar-SA', 'ar-EG')
-        const arabicIndex = voices.findIndex(v => v.lang.toLowerCase().includes('ar-'));
-
-        if (arabicIndex !== -1) {
-            voiceSelect.value = arabicIndex;
-        }
-    }
-}
 
 function copyResults() {
     // Use the original text (markdown) instead of rendered HTML
@@ -1250,68 +1235,112 @@ function setupTTS() {
             .replace(/\s+/g, ' ')
             .trim();
     }
-    function populateVoices() {
-        if (!voiceSelect) return;
-        const voices = window.speechSynthesis.getVoices();
-        voiceSelect.innerHTML = '<option value="">Default Voice</option>';
-        voices.forEach((voice, index) => {
-            const option = document.createElement('option');
-            option.textContent = `${voice.name} (${voice.lang})`;
-            option.value = index;
-            voiceSelect.appendChild(option);
-        });
-    }
 
-    populateVoices();
-    if (window.speechSynthesis && window.speechSynthesis.onvoiceschanged !== undefined) {
-        window.speechSynthesis.onvoiceschanged = populateVoices;
-    }
+    let isReading = false;
 
     if (readAloudBtn) {
-        readAloudBtn.addEventListener('click', () => {
-            if (window.speechSynthesis.speaking) {
-                window.speechSynthesis.cancel();
+        console.log('TTS: Listener attaching');
+        readAloudBtn.removeEventListener('click', null); // dummy remove
+
+        readAloudBtn.addEventListener('click', async () => {
+            // DEBUG: Alert to confirm click is registered
+            // alert('Read button clicked!'); 
+
+            if (isReading) {
+                // showMessage('Already reading...', 'info');
+                console.warn('TTS: Already reading');
+                return;
             }
 
-            // Get text to speak
             let textToRead = currentResultText;
             if (!textToRead && resultsContent) {
                 textToRead = resultsContent.innerText;
             }
 
-            if (!textToRead) return;
-            textToRead = cleanTextForTTS(textToRead);
-
-            const utterance = new SpeechSynthesisUtterance(textToRead);
-
-            const selectedVoiceIndex = voiceSelect.value;
-            if (selectedVoiceIndex) {
-                utterance.voice = window.speechSynthesis.getVoices()[selectedVoiceIndex];
+            if (!textToRead) {
+                alert('No text found to read! Please perform OCR first.');
+                return;
             }
 
-            utterance.onstart = () => {
-                readAloudBtn.style.display = 'none';
-                stopReadBtn.style.display = 'inline-block';
-            };
+            textToRead = cleanTextForTTS(textToRead);
 
-            utterance.onend = () => {
+            if (!textToRead) {
+                alert('Text is empty after cleaning.');
+                return;
+            }
+
+            isReading = true;
+            readAloudBtn.style.display = 'none';
+            stopReadBtn.style.display = 'inline-block';
+            showMessage('Generating audio...', 'info');
+
+            try {
+                const ttsEngine = ttsEngineSelect ? ttsEngineSelect.value : 'edge_tts';
+                console.log('TTS: Engine:', ttsEngine);
+
+                const response = await fetch(`${getServerUrl()}/tts`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        text: textToRead,
+                        tts_engine: ttsEngine
+                    })
+                });
+
+                const result = await response.json();
+                console.log('TTS Result:', result);
+
+                if (result.status === 'success' && result.audio_url) {
+                    showMessage('Playing audio...', 'success');
+                    if (ttsAudio) {
+                        ttsAudio.src = `${getServerUrl()}${result.audio_url}`;
+                        ttsAudio.onended = () => {
+                            isReading = false;
+                            readAloudBtn.style.display = 'inline-block';
+                            stopReadBtn.style.display = 'none';
+                            showMessage('Finished reading', 'success');
+                        };
+                        ttsAudio.onerror = (e) => {
+                            alert('Audio playback failed: ' + e.message);
+                            isReading = false;
+                            readAloudBtn.style.display = 'inline-block';
+                            stopReadBtn.style.display = 'none';
+                        };
+                        try {
+                            await ttsAudio.play();
+                        } catch (playError) {
+                            console.error('Play error:', playError);
+                            alert('Play error: ' + playError.message);
+                            isReading = false;
+                            readAloudBtn.style.display = 'inline-block';
+                            stopReadBtn.style.display = 'none';
+                        }
+                    }
+                } else {
+                    alert('TTS Backend Error: ' + result.message);
+                    showMessage('TTS Error: ' + result.message, 'error');
+                    isReading = false;
+                    readAloudBtn.style.display = 'inline-block';
+                    stopReadBtn.style.display = 'none';
+                }
+            } catch (error) {
+                console.error('TTS Network Error:', error);
+                alert('TTS Network Error: ' + error.message);
+                showMessage('TTS Error: ' + error.message, 'error');
+                isReading = false;
                 readAloudBtn.style.display = 'inline-block';
                 stopReadBtn.style.display = 'none';
-            };
-
-            utterance.onerror = (e) => {
-                console.error('TTS Error:', e);
-                readAloudBtn.style.display = 'inline-block';
-                stopReadBtn.style.display = 'none';
-            };
-
-            window.speechSynthesis.speak(utterance);
+            }
         });
     }
 
     if (stopReadBtn) {
         stopReadBtn.addEventListener('click', () => {
-            window.speechSynthesis.cancel();
+            if (ttsAudio) {
+                ttsAudio.pause();
+                ttsAudio.currentTime = 0;
+            }
+            isReading = false;
             readAloudBtn.style.display = 'inline-block';
             stopReadBtn.style.display = 'none';
         });

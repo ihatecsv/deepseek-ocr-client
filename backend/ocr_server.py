@@ -49,6 +49,32 @@ except ImportError:
         TESSERACT_AVAILABLE
     )
 
+# Import TTS module
+try:
+    from tts_server import (
+        edge_tts_generate,
+        coqui_tts_generate,
+        check_tts_availability,
+        detect_language,
+        EDGE_TTS_AVAILABLE,
+        COQUI_AVAILABLE
+    )
+except ImportError:
+    try:
+        from backend.tts_server import (
+            edge_tts_generate,
+            coqui_tts_generate,
+            check_tts_availability,
+            detect_language,
+            EDGE_TTS_AVAILABLE,
+            COQUI_AVAILABLE
+        )
+    except ImportError:
+        EDGE_TTS_AVAILABLE = False
+        COQUI_AVAILABLE = False
+        def check_tts_availability():
+            return {'edge_tts': False, 'coqui_xtts': False}
+
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -983,6 +1009,66 @@ def perform_ocr_batch():
         import traceback
         traceback.print_exc()
         return jsonify({'status': 'error', 'message': str(e)}), 500
+
+@app.route('/tts', methods=['POST'])
+def text_to_speech():
+    """Convert text to speech using Edge TTS (CPU) or Coqui XTTS (GPU)"""
+    try:
+        data = request.get_json(silent=True) or {}
+        text = data.get('text', '')
+        language = data.get('language')  # Auto-detect if None
+        tts_engine = data.get('tts_engine', 'edge_tts')
+        
+        if not text:
+            return jsonify({'status': 'error', 'message': 'No text provided'}), 400
+        
+        # Generate unique output filename
+        import uuid
+        audio_filename = f"tts_output_{uuid.uuid4().hex}.mp3"
+        audio_path = os.path.join(OUTPUT_DIR, audio_filename)
+        os.makedirs(OUTPUT_DIR, exist_ok=True)
+        
+        if tts_engine == 'coqui_xtts':
+            if not COQUI_AVAILABLE:
+                return jsonify({
+                    'status': 'error',
+                    'message': 'Coqui XTTS not available. Please use Edge TTS or install: pip install TTS'
+                }), 500
+            result = coqui_tts_generate(text, audio_path, language)
+        else:
+            # Default to Edge TTS (CPU)
+            if not EDGE_TTS_AVAILABLE:
+                return jsonify({
+                    'status': 'error',
+                    'message': 'Edge TTS not available. Install: pip install edge-tts'
+                }), 500
+            # Run async function
+            import asyncio
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            result = loop.run_until_complete(edge_tts_generate(text, audio_path, language))
+            loop.close()
+        
+        if result['status'] == 'success':
+            return jsonify({
+                'status': 'success',
+                'audio_url': f'/outputs/{audio_filename}',
+                'engine': result.get('engine'),
+                'language': result.get('language')
+            })
+        else:
+            return jsonify(result), 500
+            
+    except Exception as e:
+        logger.error(f"TTS error: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+@app.route('/tts_status', methods=['GET'])
+def get_tts_status():
+    """Check available TTS engines"""
+    return jsonify(check_tts_availability())
 
 if __name__ == '__main__':
     # Load model on startup

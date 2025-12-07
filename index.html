@@ -151,8 +151,9 @@
                         </div>
                         <div class="results-buttons">
                             <div class="tts-controls" style="display: none;" id="tts-controls">
-                                <select id="voice-select" class="select-small" title="Select Voice">
-                                    <option value="">Default Voice</option>
+                                <select id="tts-engine" class="select-small" title="TTS Engine">
+                                    <option value="edge_tts">Edge TTS (CPU)</option>
+                                    <option value="coqui_xtts">Coqui XTTS (GPU)</option>
                                 </select>
                                 <button id="read-aloud-btn" class="btn btn-small" title="Read Aloud">
                                     🔊 Read
@@ -161,6 +162,7 @@
                                     style="display: none;">
                                     ⏹ Stop
                                 </button>
+                                <audio id="tts-audio" style="display: none;"></audio>
                             </div>
                             <button id="view-boxes-btn" class="btn btn-small" style="display: none;">View Boxes
                                 Image</button>
