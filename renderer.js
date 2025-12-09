@@ -82,6 +82,15 @@ window.addEventListener('DOMContentLoaded', () => {
         });
     }
 
+    // Preload speech synthesis voices (they load asynchronously)
+    if ('speechSynthesis' in window) {
+        speechSynthesis.getVoices();
+        speechSynthesis.onvoiceschanged = () => {
+            const voices = speechSynthesis.getVoices();
+            console.log('Speech synthesis voices loaded:', voices.length);
+        };
+    }
+
     checkServerStatus();
     setupEventListeners();
     setupTTS();
@@ -1301,35 +1310,158 @@ function setupTTS() {
                             showMessage('Finished reading', 'success');
                         };
                         ttsAudio.onerror = (e) => {
-                            alert('Audio playback failed: ' + e.message);
-                            isReading = false;
-                            readAloudBtn.style.display = 'inline-block';
-                            stopReadBtn.style.display = 'none';
+                            console.error('Audio playback failed, trying browser TTS...');
+                            useBrowserTTS(textToRead, isReading, readAloudBtn, stopReadBtn);
                         };
                         try {
                             await ttsAudio.play();
                         } catch (playError) {
-                            console.error('Play error:', playError);
-                            alert('Play error: ' + playError.message);
-                            isReading = false;
-                            readAloudBtn.style.display = 'inline-block';
-                            stopReadBtn.style.display = 'none';
+                            console.error('Play error, trying browser TTS:', playError);
+                            useBrowserTTS(textToRead, isReading, readAloudBtn, stopReadBtn);
                         }
                     }
                 } else {
-                    alert('TTS Backend Error: ' + result.message);
-                    showMessage('TTS Error: ' + result.message, 'error');
+                    // Backend TTS failed, use browser Speech API as fallback
+                    console.log('Backend TTS failed, using browser Speech API...');
+                    showMessage('Using browser TTS...', 'info');
+                    useBrowserTTS(textToRead, isReading, readAloudBtn, stopReadBtn);
+                }
+            } catch (error) {
+                console.error('TTS Network Error, using browser TTS:', error);
+                showMessage('Using browser TTS...', 'info');
+                useBrowserTTS(textToRead, isReading, readAloudBtn, stopReadBtn);
+            }
+
+            // Browser TTS fallback function
+            function useBrowserTTS(text, isReadingRef, readBtn, stopBtn) {
+                console.log('Using browser TTS fallback...');
+
+                if (!('speechSynthesis' in window)) {
+                    alert('Your browser does not support text-to-speech.');
                     isReading = false;
                     readAloudBtn.style.display = 'inline-block';
                     stopReadBtn.style.display = 'none';
+                    return;
                 }
-            } catch (error) {
-                console.error('TTS Network Error:', error);
-                alert('TTS Network Error: ' + error.message);
-                showMessage('TTS Error: ' + error.message, 'error');
-                isReading = false;
-                readAloudBtn.style.display = 'inline-block';
-                stopReadBtn.style.display = 'none';
+
+                // Get voices - may need to wait for them to load
+                let voices = speechSynthesis.getVoices();
+                if (voices.length === 0) {
+                    // Voices not loaded yet, try again after a delay
+                    setTimeout(() => {
+                        voices = speechSynthesis.getVoices();
+                        startBrowserSpeech(text, voices);
+                    }, 200);
+                } else {
+                    startBrowserSpeech(text, voices);
+                }
+
+                function startBrowserSpeech(textToSpeak, availableVoices) {
+                    console.log('Available voices:', availableVoices.length);
+                    availableVoices.forEach((v, i) => console.log(`  ${i}: ${v.name} (${v.lang})`));
+
+                    // Cancel any ongoing speech
+                    speechSynthesis.cancel();
+
+                    const utterance = new SpeechSynthesisUtterance(text);
+
+                    // Detect language from text content
+                    function detectLanguage(text) {
+                        if (!text) return 'en';
+
+                        const len = text.length;
+
+                        // Count character types
+                        const arabicChars = (text.match(/[\u0600-\u06FF]/g) || []).length;
+                        const chineseChars = (text.match(/[\u4e00-\u9fff]/g) || []).length;
+                        const japaneseChars = (text.match(/[\u3040-\u30ff]/g) || []).length;
+                        const koreanChars = (text.match(/[\uac00-\ud7af]/g) || []).length;
+                        const cyrillicChars = (text.match(/[\u0400-\u04FF]/g) || []).length;
+
+                        // French-specific characters and common words
+                        const frenchPattern = /[àâäéèêëïîôùûüÿœæç]|(\b(le|la|les|de|du|des|et|en|un|une|est|que|qui|dans|pour|sur|avec|ce|cette|sont|ont|pas|mais|aussi|plus|tout|comme|elle|il|nous|vous|ils|elles|leur|très|bien|fait|peut|être|avoir|faire|voir|dire|tous|aller|venir|prendre|donner|même|autre|grand|petit|nouveau|premier|dernier|jeune|vieux|beau|bon|mauvais|français|france)\b)/gi;
+                        const frenchMatches = text.match(frenchPattern) || [];
+                        const frenchScore = frenchMatches.length;
+
+                        // German-specific characters and common words
+                        const germanPattern = /[äöüßÄÖÜ]|(\b(der|die|das|und|ist|ein|eine|für|mit|auf|nicht|ich|sie|wir|ihr|es|von|zu|den|dem|sich|als|auch|nach|bei|aus|wenn|noch|werden|haben|sein|werden|kann|so|mehr|sehr|nur|dann|aber|über|vor|können|schon|wieder|gegen|unter|zwischen)\b)/gi;
+                        const germanMatches = text.match(germanPattern) || [];
+                        const germanScore = germanMatches.length;
+
+                        // Spanish-specific characters and common words
+                        const spanishPattern = /[áéíóúñü¿¡]|(\b(el|la|los|las|de|del|en|un|una|es|que|y|por|con|para|se|como|más|su|pero|este|esta|son|sus|al|le|lo|me|ya|muy|sin|sobre|todo|también|bien|puede|donde|cuando|hace|tiene|tengo|hay|entre|así|porque|antes|después|cada|desde|hasta|durante|mediante|según|ser|estar|tener|hacer|poder|decir|ir|ver|dar|saber|querer|llegar|pasar|deber|poner|parecer|quedar|creer|hablar|llevar|dejar|seguir|encontrar|llamar|venir|pensar|salir|volver|tomar|conocer|vivir|sentir|tratar|mirar|contar|empezar|esperar|buscar|existir|entrar|trabajar|escribir|perder|producir|ocurrir|entender|pedir|recibir|recordar|terminar|permitir|aparecer|conseguir|comenzar|servir|sacar|necesitar|mantener|resultar|leer|caer|cambiar|presentar|crear|abrir|considerar|oír|acabar|convertir|ganar|formar|traer|partir|morir|aceptar|realizar|suponer|comprender|lograr|explicar|preguntar|tocar|reconocer|estudiar|alcanzar|nacer|dirigir|correr|utilizar|pagar|ayudar|gustar|jugar|escuchar|cumplir|ofrecer|descubrir|levantar|intentar)\b)/gi;
+                        const spanishMatches = text.match(spanishPattern) || [];
+                        const spanishScore = spanishMatches.length;
+
+                        const threshold = 0.1;
+
+                        if (arabicChars / len > threshold) return 'ar';
+                        if (chineseChars / len > threshold) return 'zh';
+                        if (japaneseChars / len > threshold) return 'ja';
+                        if (koreanChars / len > threshold) return 'ko';
+                        if (cyrillicChars / len > threshold) return 'ru';
+
+                        // Check word-based scoring for Latin languages
+                        const wordCount = text.split(/\s+/).length;
+                        if (frenchScore > wordCount * 0.1) return 'fr';
+                        if (germanScore > wordCount * 0.1) return 'de';
+                        if (spanishScore > wordCount * 0.1) return 'es';
+
+                        return 'en'; // Default to English
+                    }
+
+                    // Get available voices and find best match
+                    const voices = speechSynthesis.getVoices();
+                    const detectedLang = detectLanguage(text);
+                    console.log('Detected language:', detectedLang);
+
+                    // Find voice for detected language
+                    const matchingVoice = availableVoices.find(v => v.lang.startsWith(detectedLang));
+                    const englishVoice = availableVoices.find(v => v.lang.startsWith('en'));
+                    const frenchVoice = availableVoices.find(v => v.lang.startsWith('fr'));
+                    const arabicVoice = availableVoices.find(v => v.lang.startsWith('ar'));
+
+                    if (matchingVoice) {
+                        utterance.voice = matchingVoice;
+                        utterance.lang = detectedLang;
+                        console.log('Using voice:', matchingVoice.name, 'for language:', detectedLang);
+                        showMessage(`Using ${matchingVoice.name} for ${detectedLang}`, 'success');
+                    } else {
+                        // No voice for detected language
+                        const availableLangs = [...new Set(availableVoices.map(v => v.lang.split('-')[0]))];
+                        console.warn(`No voice found for ${detectedLang}. Available languages:`, availableLangs);
+
+                        if (detectedLang === 'ar' && !arabicVoice) {
+                            alert(`No Arabic voice installed on your system.\n\nTo add Arabic voice:\n1. Windows: Settings > Time & Language > Speech > Add voices\n2. Or install Arabic language pack\n\nWill read in English instead.`);
+                        } else if (detectedLang === 'fr' && !frenchVoice) {
+                            alert(`No French voice installed.\n\nWill read in English instead.`);
+                        }
+
+                        if (englishVoice) {
+                            utterance.voice = englishVoice;
+                            utterance.lang = 'en-US';
+                            console.log('Fallback to English voice');
+                            showMessage('Using English voice (no ' + detectedLang + ' voice available)', 'warning');
+                        }
+                    }
+
+                    utterance.onend = () => {
+                        isReading = false;
+                        readAloudBtn.style.display = 'inline-block';
+                        stopReadBtn.style.display = 'none';
+                        showMessage('Finished reading', 'success');
+                    };
+
+                    utterance.onerror = (e) => {
+                        console.error('Browser TTS error:', e);
+                        isReading = false;
+                        readAloudBtn.style.display = 'inline-block';
+                        stopReadBtn.style.display = 'none';
+                        showMessage('TTS error: ' + e.error, 'error');
+                    };
+
+                    speechSynthesis.speak(utterance);
+                }
             }
         });
     }
