@@ -87,7 +87,24 @@ A real-time Electron-based desktop GUI for [DeepSeek-OCR](https://github.com/dee
  ### "Internal Server Error" on TTS
  - This usually means a dependency is missing.
  - Try running `pip install edge-tts` manually if issues persist, or ensure `start-client.bat` has run fully.
- 
+
+ ### Arabic/French/Other Languages Not Speaking
+ If TTS reads only part of your text or skips non-English content, you may need to install additional voice packs:
+
+ **Windows 10/11:**
+ 1. Open **Settings** → **Time & Language** → **Speech**
+ 2. Under "Manage voices", click **Add voices**
+ 3. Search for and install the language you need:
+    - Arabic (Saudi Arabia, Egypt, UAE, etc.)
+    - French (France, Canada, etc.)
+    - German, Spanish, Chinese, Japanese, etc.
+ 4. **Restart the app** after installation
+
+ **Note:** The app will automatically detect the text language and use the appropriate voice if installed. If no matching voice is found, it will fall back to English.
+
+ ### Edge TTS "No audio received" Error
+ This error means Microsoft's Edge TTS service is unavailable. The app will automatically fall back to your system's built-in speech synthesis (Web Speech API). Make sure you have voices installed as described above.
+
  ## License
 
 MIT
