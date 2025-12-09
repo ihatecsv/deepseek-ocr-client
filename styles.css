@@ -30,27 +30,26 @@ header {
 
 .header-top {
     display: flex;
-    gap: 20px;
-    align-items: center;
-    justify-content: space-between;
+    flex-direction: column;
+    gap: 12px;
 }
 
 .header-left {
-    flex-shrink: 0;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 15px;
 }
 
 .header-divider {
-    width: 2px;
-    background: rgba(255, 255, 255, 0.2);
-    margin: 0 10px;
+    display: none;
 }
 
 .header-right {
-    flex: 1;
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
-    justify-content: flex-end;
-    gap: 20px;
+    gap: 15px;
 }
 
 header h1 {
@@ -192,12 +191,14 @@ main {
     flex-direction: column;
     gap: 10px;
     flex-shrink: 0;
+    flex: 1;
+    min-width: 300px;
 }
 
 .controls-grid {
     display: grid;
-    grid-template-columns: repeat(4, 1fr);
-    gap: 12px;
+    grid-template-columns: repeat(auto-fit, minmax(80px, 1fr));
+    gap: 10px;
     align-items: end;
 }
 
@@ -221,7 +222,7 @@ main {
 }
 
 .form-group select {
-    padding: 6px 8px;
+    padding: 6px 10px;
     border: 1px solid rgba(255, 255, 255, 0.3);
     border-radius: 4px;
     font-size: 12px;
@@ -237,14 +238,15 @@ main {
 }
 
 .btn {
-    padding: 10px 20px;
+    padding: 8px 16px;
     border: none;
-    border-radius: 6px;
-    font-size: 14px;
+    border-radius: 4px;
+    font-size: 13px;
     font-weight: 600;
     cursor: pointer;
     transition: all 0.3s ease;
     outline: none;
+    white-space: nowrap;
 }
 
 .btn:disabled {
@@ -292,9 +294,9 @@ main {
 }
 
 .controls-buttons .btn {
-    padding: 8px 16px;
+    padding: 8px 14px;
     font-size: 12px;
-    flex: 1;
+    flex: 0 0 auto;
 }
 
 .results-section {
@@ -429,13 +431,23 @@ main {
 }
 
 @keyframes spin {
-    0% { transform: rotate(0deg); }
-    100% { transform: rotate(360deg); }
+    0% {
+        transform: rotate(0deg);
+    }
+
+    100% {
+        transform: rotate(360deg);
+    }
 }
 
 @keyframes fadeIn {
-    from { opacity: 0; }
-    to { opacity: 0.8; }
+    from {
+        opacity: 0;
+    }
+
+    to {
+        opacity: 0.8;
+    }
 }
 
 .loading-subtext {
@@ -558,8 +570,13 @@ main {
 }
 
 @keyframes fadeIn {
-    from { opacity: 0; }
-    to { opacity: 1; }
+    from {
+        opacity: 0;
+    }
+
+    to {
+        opacity: 1;
+    }
 }
 
 .lightbox-content {
@@ -647,7 +664,8 @@ main {
     color: #333;
 }
 
-.results-content ul, .results-content ol {
+.results-content ul,
+.results-content ol {
     margin-left: 1.5em;
     margin-top: 0.5em;
     margin-bottom: 0.5em;
@@ -736,4 +754,29 @@ main {
     border-radius: 6px;
     margin: 1em 0;
     box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+}
+
+/* TTS Controls */
+.tts-controls {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-right: 10px;
+    padding-right: 10px;
+    border-right: 1px solid #ddd;
+}
+
+.select-small {
+    padding: 6px 8px;
+    border: 1px solid #ddd;
+    border-radius: 4px;
+    font-size: 12px;
+    max-width: 150px;
+    cursor: pointer;
+    background: white;
+}
+
+.select-small:focus {
+    outline: none;
+    border-color: #4c51bf;
 }

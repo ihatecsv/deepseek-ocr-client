@@ -2,17 +2,78 @@
 """
 DeepSeek OCR Backend Server
 Handles model loading, caching, and OCR inference
+Supports both DeepSeek-OCR (GPU) and Tesseract (CPU) engines
 """
 import os
 import sys
 import logging
 from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
-import torch
-from transformers import AutoModel, AutoTokenizer
 import tempfile
 import time
 from threading import Thread, Lock
+import fitz
+
+# Conditional imports for GPU-based OCR
+DEEPSEEK_AVAILABLE = False
+torch = None
+AutoModel = None
+AutoTokenizer = None
+
+try:
+    import torch as _torch
+    from transformers import AutoModel as _AutoModel, AutoTokenizer as _AutoTokenizer
+    torch = _torch
+    AutoModel = _AutoModel
+    AutoTokenizer = _AutoTokenizer
+    DEEPSEEK_AVAILABLE = True
+except ImportError as e:
+    logging.warning(f"PyTorch/Transformers not available: {e}")
+    logging.info("DeepSeek-OCR will be disabled. Tesseract OCR is still available.")
+
+# Import Tesseract OCR module
+try:
+    # When running from the backend directory
+    from tesseract_ocr import (
+        check_tesseract_availability,
+        perform_tesseract_ocr,
+        get_available_languages,
+        TESSERACT_AVAILABLE
+    )
+except ImportError:
+    # When running from the project root
+    from backend.tesseract_ocr import (
+        check_tesseract_availability,
+        perform_tesseract_ocr,
+        get_available_languages,
+        TESSERACT_AVAILABLE
+    )
+
+# Import TTS module
+try:
+    from tts_server import (
+        edge_tts_generate,
+        coqui_tts_generate,
+        check_tts_availability,
+        detect_language,
+        EDGE_TTS_AVAILABLE,
+        COQUI_AVAILABLE
+    )
+except ImportError:
+    try:
+        from backend.tts_server import (
+            edge_tts_generate,
+            coqui_tts_generate,
+            check_tts_availability,
+            detect_language,
+            EDGE_TTS_AVAILABLE,
+            COQUI_AVAILABLE
+        )
+    except ImportError:
+        EDGE_TTS_AVAILABLE = False
+        COQUI_AVAILABLE = False
+        def check_tts_availability():
+            return {'edge_tts': False, 'coqui_xtts': False}
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -29,11 +90,17 @@ model = None
 tokenizer = None
 MODEL_NAME = 'deepseek-ai/DeepSeek-OCR'
 
+# OCR engine preference: 'tesseract' | 'deepseek'
+ocr_engine_preference = 'tesseract'
+
 # Use local cache directory relative to the app
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 CACHE_DIR = os.path.join(SCRIPT_DIR, '..', 'cache')
 MODEL_CACHE_DIR = os.path.join(CACHE_DIR, 'models')
 OUTPUT_DIR = os.path.join(CACHE_DIR, 'outputs')
+
+# Device preference: 'auto' | 'cpu' | 'gpu'
+device_preference = 'auto'
 
 # Progress tracking
 progress_data = {
@@ -158,22 +225,42 @@ def load_model_background():
 
         # Try to use flash attention if available, otherwise fallback
         try:
-            model = AutoModel.from_pretrained(
-                MODEL_NAME,
-                _attn_implementation='flash_attention_2',
-                trust_remote_code=True,
-                use_safetensors=True,
-                cache_dir=MODEL_CACHE_DIR
-            )
-            logger.info("Using flash attention 2")
+            # 首先检查transformers版本是否支持flash_attention_2
+            import transformers
+            transformers_version = transformers.__version__
+            logger.info(f"Transformers version: {transformers_version}")
+
+            try:
+                import transformers.models.llama.modeling_llama as modeling_llama
+                if not hasattr(modeling_llama, 'LlamaFlashAttention2'):
+                    class LlamaFlashAttention2:
+                        pass
+                    modeling_llama.LlamaFlashAttention2 = LlamaFlashAttention2
+            except Exception as _e:
+                logger.warning(f"Flash attention shim failed: {_e}")
+
+            # 尝试使用flash attention 2
+            try:
+                model = AutoModel.from_pretrained(
+                    MODEL_NAME,
+                    _attn_implementation='flash_attention_2',
+                    trust_remote_code=True,
+                    use_safetensors=True,
+                    cache_dir=MODEL_CACHE_DIR
+                )
+                logger.info("Using flash attention 2")
+            except Exception as e:
+                logger.warning(f"Flash attention 2 not supported with current transformers version: {e}")
+                logger.info("Falling back to default attention implementation")
+                model = AutoModel.from_pretrained(
+                    MODEL_NAME,
+                    trust_remote_code=True,
+                    use_safetensors=True,
+                    cache_dir=MODEL_CACHE_DIR
+                )
         except Exception as e:
-            logger.warning(f"Flash attention not available: {e}, using default attention")
-            model = AutoModel.from_pretrained(
-                MODEL_NAME,
-                trust_remote_code=True,
-                use_safetensors=True,
-                cache_dir=MODEL_CACHE_DIR
-            )
+            logger.warning(f"Error loading model: {e}")
+            raise e
 
         # Stop download monitor and wait for it to finish
         download_monitor_active[0] = False
@@ -184,12 +271,15 @@ def load_model_background():
         model = model.eval()
 
         # Move to GPU if available (90% progress)
-        update_progress('loading', 'gpu', 'Optimizing model on GPU...', 90)
-        if has_gpu:
+        update_progress('loading', 'gpu', 'Optimizing model...', 90)
+        if device_preference == 'cpu':
+            logger.info("Device preference set to CPU")
+        elif device_preference == 'gpu' and not has_gpu:
+            logger.warning("GPU requested but not available; falling back to CPU")
+        if has_gpu and device_preference != 'cpu':
             model = model.cuda().to(torch.bfloat16)
             logger.info("Model loaded on GPU with bfloat16")
         else:
-            # CPU mode - use float32
             logger.info("Model loaded on CPU (inference will be slower)")
 
         logger.info("Model loaded successfully!")
@@ -200,6 +290,9 @@ def load_model_background():
         update_progress('error', 'failed', str(e), 0)
         import traceback
         traceback.print_exc()
+        # 确保在错误情况下重置模型和分词器
+        model = None
+        tokenizer = None
 
 def load_model():
     """Load the DeepSeek OCR model and tokenizer
@@ -221,22 +314,41 @@ def load_model():
     # Check if already loading
     if loading_thread is not None and loading_thread.is_alive():
         logger.info("Model loading already in progress")
-        return True
+        # 等待加载完成
+        loading_thread.join(timeout=300)  # 等待最多5分钟
+        if model is not None and tokenizer is not None:
+            return True
+        else:
+            logger.error("Model loading timed out or failed")
+            return False
 
     # Start loading in background thread
     loading_thread = Thread(target=load_model_background)
     loading_thread.daemon = True
     loading_thread.start()
 
-    return True
+    # 等待加载完成
+    loading_thread.join(timeout=300)  # 等待最多5分钟
+    if model is not None and tokenizer is not None:
+        return True
+    else:
+        logger.error("Model loading failed")
+        return False
 
 @app.route('/health', methods=['GET'])
 def health_check():
     """Health check endpoint"""
+    tesseract_info = check_tesseract_availability()
+    gpu_available = torch.cuda.is_available() if torch else False
+    
     return jsonify({
         'status': 'ok',
         'model_loaded': model is not None,
-        'gpu_available': torch.cuda.is_available()
+        'gpu_available': gpu_available,
+        'deepseek_available': DEEPSEEK_AVAILABLE,
+        'tesseract_available': tesseract_info.get('available', False),
+        'tesseract_info': tesseract_info,
+        'ocr_engine': ocr_engine_preference
     })
 
 @app.route('/progress', methods=['GET'])
@@ -249,35 +361,118 @@ def get_progress():
 @app.route('/load_model', methods=['POST'])
 def load_model_endpoint():
     """Endpoint to trigger model loading"""
+    global device_preference, ocr_engine_preference
+    
+    try:
+        data = request.get_json(silent=True) or {}
+        
+        # Handle OCR engine preference
+        if 'ocr_engine' in data:
+            ocr_engine_preference = data['ocr_engine']
+            logger.info(f"OCR engine set to: {ocr_engine_preference}")
+        
+        # If Tesseract mode, no model loading needed
+        if ocr_engine_preference == 'tesseract':
+            tesseract_info = check_tesseract_availability()
+            if tesseract_info.get('available'):
+                return jsonify({
+                    'status': 'success',
+                    'message': f"Tesseract OCR ready (v{tesseract_info.get('version', 'unknown')})",
+                    'engine': 'tesseract'
+                })
+            else:
+                return jsonify({
+                    'status': 'error',
+                    'message': tesseract_info.get('error', 'Tesseract not available')
+                }), 500
+        
+        # DeepSeek model loading
+        if not DEEPSEEK_AVAILABLE:
+            return jsonify({
+                'status': 'error',
+                'message': 'DeepSeek-OCR requires PyTorch and CUDA. Please install them or use Tesseract mode.'
+            }), 500
+        
+        if 'force_cpu' in data and data['force_cpu']:
+            device_preference = 'cpu'
+        else:
+            device_preference = 'auto'
+    except Exception as e:
+        logger.error(f"Error in load_model_endpoint: {e}")
+        device_preference = 'auto'
+
     success = load_model()
     if success:
-        return jsonify({'status': 'success', 'message': 'Model loaded successfully'})
+        return jsonify({'status': 'success', 'message': 'Model loaded successfully', 'engine': 'deepseek'})
     else:
         return jsonify({'status': 'error', 'message': 'Failed to load model'}), 500
 
 @app.route('/ocr', methods=['POST'])
 def perform_ocr():
     """Perform OCR on uploaded image"""
-    global model, tokenizer
+    global model, tokenizer, ocr_engine_preference
 
     try:
-        # Check if model is loaded
-        if model is None or tokenizer is None:
-            logger.info("Model not loaded, loading now...")
-            if not load_model():
-                return jsonify({'status': 'error', 'message': 'Failed to load model'}), 500
-
         # Get image from request
         if 'image' not in request.files:
             return jsonify({'status': 'error', 'message': 'No image provided'}), 400
 
         image_file = request.files['image']
-
+        
+        # Check OCR engine preference from request or use global
+        ocr_engine = request.form.get('ocr_engine', ocr_engine_preference)
+        
         # Get optional parameters
         prompt_type = request.form.get('prompt_type', 'document')
         base_size = int(request.form.get('base_size', 1024))
         image_size = int(request.form.get('image_size', 640))
         crop_mode = request.form.get('crop_mode', 'true').lower() == 'true'
+        
+        # Save image temporarily
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.jpg') as tmp_file:
+            image_file.save(tmp_file.name)
+            temp_image_path = tmp_file.name
+        
+        # Tesseract OCR path
+        if ocr_engine == 'tesseract':
+            logger.info("Using Tesseract OCR engine")
+            os.makedirs(OUTPUT_DIR, exist_ok=True)
+            
+            result = perform_tesseract_ocr(temp_image_path, output_dir=OUTPUT_DIR)
+            
+            # Clean up temp file
+            if os.path.exists(temp_image_path):
+                os.remove(temp_image_path)
+            
+            if result['status'] == 'success':
+                return jsonify(result)
+            else:
+                return jsonify(result), 500
+        
+        # DeepSeek OCR path (requires GPU)
+        if not DEEPSEEK_AVAILABLE:
+            if os.path.exists(temp_image_path):
+                os.remove(temp_image_path)
+            return jsonify({
+                'status': 'error', 
+                'message': 'DeepSeek-OCR requires PyTorch. Please switch to Tesseract mode or install PyTorch.'
+            }), 500
+        
+        # Check if model is loaded
+        if model is None or tokenizer is None:
+            logger.info("Model not loaded, loading now...")
+            if not load_model():
+                logger.error("Failed to load model")
+                if os.path.exists(temp_image_path):
+                    os.remove(temp_image_path)
+                return jsonify({'status': 'error', 'message': 'Failed to load model. Please check logs for details.'}), 500
+
+        # 再次检查模型是否已成功加载
+        if model is None or tokenizer is None:
+            logger.error("Model is still None after loading attempt")
+            if os.path.exists(temp_image_path):
+                os.remove(temp_image_path)
+            return jsonify({'status': 'error', 'message': 'Model loading failed. Please restart the application.'}), 500
 
         # Define prompts and their expected output file extensions
         prompt_configs = {
@@ -308,11 +503,6 @@ def perform_ocr():
         expected_output_file = config['output_file']
 
         logger.info(f"Processing OCR request with prompt type: {prompt_type}")
-
-        # Save image temporarily
-        with tempfile.NamedTemporaryFile(delete=False, suffix='.jpg') as tmp_file:
-            image_file.save(tmp_file.name)
-            temp_image_path = tmp_file.name
 
         # Create output directory if it doesn't exist
         os.makedirs(OUTPUT_DIR, exist_ok=True)
@@ -351,27 +541,16 @@ def perform_ocr():
                 self.accumulated_text += text
 
                 # Count === markers to determine sections
-                # Section 0-1: Before first ===
-                # Section 1-2: BASE/PATCHES info
-                # Section 2-3: Token generation (what we want)
-                # Section 3+: Compression stats
-                self.section_count = self.accumulated_text.count('=' * 20)  # Count long === lines
+                self.section_count = self.accumulated_text.count('=' * 20)
 
                 # Extract and process token section (between 2nd and 3rd ===)
                 if self.section_count >= 2:
-                    # Find the token section
                     parts = self.accumulated_text.split('=' * 20)
                     if len(parts) >= 3:
-                        # Token section is between 2nd and 3rd === markers
                         token_section = parts[2]
-
-                        # Store the raw token section, removing any leading/trailing = and whitespace
                         raw_token_text = token_section.strip().lstrip('=').strip()
-
-                        # Count characters in the raw token text
                         char_count[0] = len(raw_token_text)
 
-                        # Update progress with the raw token stream (no artificial newlines)
                         if char_count[0] > 0:
                             update_progress('processing', 'ocr', 'Generating OCR...', 50, char_count[0], raw_token_text)
 
@@ -410,7 +589,6 @@ def perform_ocr():
             with open(result_filepath, 'r', encoding='utf-8') as f:
                 result_text = f.read()
             logger.info(f"Successfully read result from: {expected_output_file}")
-            logger.info(f"Result text (first 200 chars): {result_text[:200]}")
         else:
             # Fallback: try to find any text-like file
             logger.warning(f"Expected file '{expected_output_file}' not found, searching for alternatives")
@@ -436,7 +614,7 @@ def perform_ocr():
         if os.path.exists(temp_image_path):
             os.remove(temp_image_path)
 
-        # Extract raw token text from the stream (between 2nd and 3rd === markers)
+        # Extract raw token text from the stream
         raw_token_text = None
         if char_stream.section_count >= 2:
             parts = char_stream.accumulated_text.split('=' * 20)
@@ -460,6 +638,216 @@ def perform_ocr():
             'message': str(e)
         }), 500
 
+@app.route('/ocr_pdf', methods=['POST'])
+def perform_ocr_pdf():
+    """Perform OCR on uploaded PDF (per-page)"""
+    global model, tokenizer, ocr_engine_preference
+
+    try:
+        if 'pdf' not in request.files:
+            return jsonify({'status': 'error', 'message': 'No PDF provided'}), 400
+
+        pdf_file = request.files['pdf']
+        ocr_engine = request.form.get('ocr_engine', ocr_engine_preference)
+        prompt_type = request.form.get('prompt_type', 'document')
+        base_size = int(request.form.get('base_size', 1024))
+        image_size = int(request.form.get('image_size', 640))
+        crop_mode = request.form.get('crop_mode', 'true').lower() == 'true'
+
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp_pdf:
+            pdf_file.save(tmp_pdf.name)
+            temp_pdf_path = tmp_pdf.name
+
+        doc = fitz.open(temp_pdf_path)
+        os.makedirs(OUTPUT_DIR, exist_ok=True)
+        pages_output = []
+        combined_texts = []
+
+        # Tesseract OCR path for PDF
+        if ocr_engine == 'tesseract':
+            logger.info("Using Tesseract OCR engine for PDF")
+            
+            for page_index in range(len(doc)):
+                page = doc.load_page(page_index)
+                pix = page.get_pixmap(dpi=144)
+                
+                page_dir = os.path.join(OUTPUT_DIR, f'pdf_page_{page_index+1}')
+                os.makedirs(page_dir, exist_ok=True)
+                
+                import uuid
+                temp_image_path = os.path.join(page_dir, f"temp_page_{page_index+1}_{uuid.uuid4().hex}.jpg")
+                
+                try:
+                    pix.save(temp_image_path)
+                    update_progress('processing', 'ocr', f'Processing PDF page {page_index+1}/{len(doc)}', int((page_index / max(1, len(doc))) * 100))
+                    
+                    result = perform_tesseract_ocr(temp_image_path, output_dir=page_dir)
+                    text = result.get('result', '')
+                    
+                    pages_output.append({
+                        'page': page_index + 1,
+                        'text': text,
+                        'boxes_image_path': None
+                    })
+                    combined_texts.append(text)
+                finally:
+                    if temp_image_path and os.path.exists(temp_image_path):
+                        try:
+                            os.remove(temp_image_path)
+                        except (PermissionError, OSError):
+                            pass
+            
+            doc.close()
+            if os.path.exists(temp_pdf_path):
+                os.remove(temp_pdf_path)
+            
+            update_progress('idle', '', '', 0, 0)
+            
+            return jsonify({
+                'status': 'success',
+                'prompt_type': prompt_type,
+                'pages': pages_output,
+                'combined_text': '\n\n'.join(combined_texts)
+            })
+
+        # DeepSeek OCR path (requires GPU)
+        if not DEEPSEEK_AVAILABLE:
+            doc.close()
+            if os.path.exists(temp_pdf_path):
+                os.remove(temp_pdf_path)
+            return jsonify({
+                'status': 'error',
+                'message': 'DeepSeek-OCR requires PyTorch. Please switch to Tesseract mode or install PyTorch.'
+            }), 500
+
+        if model is None or tokenizer is None:
+            logger.info("Model not loaded, loading now...")
+            if not load_model():
+                logger.error("Failed to load model")
+                doc.close()
+                if os.path.exists(temp_pdf_path):
+                    os.remove(temp_pdf_path)
+                return jsonify({'status': 'error', 'message': 'Failed to load model. Please check logs for details.'}), 500
+
+        if model is None or tokenizer is None:
+            logger.error("Model is still None after loading attempt")
+            doc.close()
+            if os.path.exists(temp_pdf_path):
+                os.remove(temp_pdf_path)
+            return jsonify({'status': 'error', 'message': 'Model loading failed. Please restart the application.'}), 500
+
+        prompt_configs = {
+            'document': {
+                'prompt': '<image>\n<|grounding|>Convert the document to markdown. ',
+                'output_file': 'result.mmd'
+            },
+            'ocr': {
+                'prompt': '<image>\n<|grounding|>OCR this image. ',
+                'output_file': 'result.txt'
+            },
+            'free': {
+                'prompt': '<image>\nFree OCR. ',
+                'output_file': 'result.txt'
+            },
+            'figure': {
+                'prompt': '<image>\nParse the figure. ',
+                'output_file': 'result.txt'
+            },
+            'describe': {
+                'prompt': '<image>\nDescribe this image in detail. ',
+                'output_file': 'result.txt'
+            }
+        }
+        config = prompt_configs.get(prompt_type, prompt_configs['document'])
+
+        for page_index in range(len(doc)):
+            page = doc.load_page(page_index)
+            pix = page.get_pixmap(dpi=144)
+
+            # 使用更健壮的临时文件处理方式，特别针对Windows系统
+            page_dir = os.path.join(OUTPUT_DIR, f'pdf_page_{page_index+1}')
+            os.makedirs(page_dir, exist_ok=True)
+
+            # 直接在页面目录中创建唯一临时图像文件，避免与已存在文件冲突
+            import uuid
+            temp_image_path = os.path.join(page_dir, f"temp_page_{page_index+1}_{uuid.uuid4().hex}.jpg")
+
+            try:
+                # 保存图像到我们的临时位置
+                pix.save(temp_image_path)
+
+                update_progress('processing', 'ocr', f'Processing PDF page {page_index+1}/{len(doc)}', int( (page_index/ max(1,len(doc))) * 50))
+
+                model.infer(
+                    tokenizer,
+                    prompt=config['prompt'],
+                    image_file=temp_image_path,
+                    output_path=page_dir,
+                    base_size=base_size,
+                    image_size=image_size,
+                    crop_mode=crop_mode,
+                    save_results=True,
+                    test_compress=True
+                )
+
+                result_filepath = os.path.join(page_dir, config['output_file'])
+                text = None
+                if os.path.exists(result_filepath):
+                    with open(result_filepath, 'r', encoding='utf-8') as f:
+                        text = f.read()
+                else:
+                    for filename in os.listdir(page_dir):
+                        if filename.endswith(('.txt', '.mmd', '.md')):
+                            with open(os.path.join(page_dir, filename), 'r', encoding='utf-8') as f:
+                                text = f.read()
+                            break
+
+                boxes_image_rel = None
+                boxes_image_path = os.path.join(page_dir, 'result_with_boxes.jpg')
+                if os.path.exists(boxes_image_path):
+                    boxes_image_rel = f'pdf_page_{page_index+1}/result_with_boxes.jpg'
+
+                pages_output.append({
+                    'page': page_index + 1,
+                    'text': text or '',
+                    'boxes_image_path': boxes_image_rel
+                })
+                combined_texts.append(text or '')
+            finally:
+                # 尝试删除临时图像文件，但不让错误中断处理
+                if temp_image_path and os.path.exists(temp_image_path):
+                    try:
+                        os.remove(temp_image_path)
+                    except (PermissionError, OSError) as e:
+                        logger.warning(f"Could not remove temporary file {temp_image_path}: {e}")
+                        # 在Windows上，有时文件会被锁定，我们稍后再尝试删除
+                        import time
+                        time.sleep(0.5)  # 等待500ms
+                        try:
+                            os.remove(temp_image_path)
+                        except (PermissionError, OSError):
+                            # 如果仍然失败，记录但继续处理
+                            logger.warning(f"Still could not remove temporary file {temp_image_path} after retry")
+
+        doc.close()
+        if os.path.exists(temp_pdf_path):
+            os.remove(temp_pdf_path)
+
+        update_progress('idle', '', '', 0, 0)
+
+        return jsonify({
+            'status': 'success',
+            'prompt_type': prompt_type,
+            'pages': pages_output,
+            'combined_text': '\n\n'.join(combined_texts)
+        })
+
+    except Exception as e:
+        logger.error(f"Error during PDF OCR: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
 @app.route('/model_info', methods=['GET'])
 def model_info():
     """Get information about the model"""
@@ -468,13 +856,219 @@ def model_info():
         'cache_dir': MODEL_CACHE_DIR,
         'model_loaded': model is not None,
         'gpu_available': torch.cuda.is_available(),
-        'gpu_name': torch.cuda.get_device_name(0) if torch.cuda.is_available() else None
+        'gpu_name': torch.cuda.get_device_name(0) if torch.cuda.is_available() else None,
+        'device_preference': device_preference
     })
 
 @app.route('/outputs/<path:filename>', methods=['GET'])
 def serve_output_file(filename):
     """Serve files from the outputs directory"""
     return send_from_directory(OUTPUT_DIR, filename)
+
+@app.route('/ocr_batch', methods=['POST'])
+def perform_ocr_batch():
+    """Perform OCR on multiple uploaded images"""
+    global model, tokenizer, ocr_engine_preference
+
+    try:
+        images = request.files.getlist('images')
+        if not images:
+            return jsonify({'status': 'error', 'message': 'No images provided'}), 400
+
+        ocr_engine = request.form.get('ocr_engine', ocr_engine_preference)
+        prompt_type = request.form.get('prompt_type', 'document')
+        base_size = int(request.form.get('base_size', 1024))
+        image_size = int(request.form.get('image_size', 640))
+        crop_mode = request.form.get('crop_mode', 'true').lower() == 'true'
+
+        os.makedirs(OUTPUT_DIR, exist_ok=True)
+        batch_results = []
+
+        # Tesseract OCR path for batch
+        if ocr_engine == 'tesseract':
+            logger.info("Using Tesseract OCR engine for batch")
+            
+            for idx, image_file in enumerate(images):
+                with tempfile.NamedTemporaryFile(delete=False, suffix='.jpg') as tmp_file:
+                    image_file.save(tmp_file.name)
+                    temp_image_path = tmp_file.name
+
+                item_dir = os.path.join(OUTPUT_DIR, f'batch_{idx+1}')
+                os.makedirs(item_dir, exist_ok=True)
+
+                update_progress('processing', 'ocr', f'Processing image {idx+1}/{len(images)}', int((idx / max(1, len(images))) * 100))
+
+                result = perform_tesseract_ocr(temp_image_path, output_dir=item_dir)
+                text = result.get('result', '')
+
+                batch_results.append({
+                    'index': idx + 1,
+                    'text': text,
+                    'boxes_image_path': None
+                })
+
+                if os.path.exists(temp_image_path):
+                    os.remove(temp_image_path)
+
+            update_progress('idle', '', '', 0, 0)
+
+            combined_text = '\n\n'.join([item['text'] for item in batch_results])
+            return jsonify({'status': 'success', 'prompt_type': prompt_type, 'items': batch_results, 'combined_text': combined_text})
+
+        # DeepSeek OCR path (requires GPU)
+        if not DEEPSEEK_AVAILABLE:
+            return jsonify({
+                'status': 'error',
+                'message': 'DeepSeek-OCR requires PyTorch. Please switch to Tesseract mode or install PyTorch.'
+            }), 500
+
+        if model is None or tokenizer is None:
+            logger.info("Model not loaded, loading now...")
+            if not load_model():
+                return jsonify({'status': 'error', 'message': 'Failed to load model'}), 500
+
+        prompt_configs = {
+            'document': {
+                'prompt': '<image>\n<|grounding|>Convert the document to markdown. ',
+                'output_file': 'result.mmd'
+            },
+            'ocr': {
+                'prompt': '<image>\n<|grounding|>OCR this image. ',
+                'output_file': 'result.txt'
+            },
+            'free': {
+                'prompt': '<image>\nFree OCR. ',
+                'output_file': 'result.txt'
+            },
+            'figure': {
+                'prompt': '<image>\nParse the figure. ',
+                'output_file': 'result.txt'
+            },
+            'describe': {
+                'prompt': '<image>\nDescribe this image in detail. ',
+                'output_file': 'result.txt'
+            }
+        }
+        config = prompt_configs.get(prompt_type, prompt_configs['document'])
+
+        for idx, image_file in enumerate(images):
+            with tempfile.NamedTemporaryFile(delete=False, suffix='.jpg') as tmp_file:
+                image_file.save(tmp_file.name)
+                temp_image_path = tmp_file.name
+
+            item_dir = os.path.join(OUTPUT_DIR, f'batch_{idx+1}')
+            os.makedirs(item_dir, exist_ok=True)
+
+            update_progress('processing', 'ocr', f'Processing image {idx+1}/{len(images)}', int((idx/ max(1,len(images))) * 50))
+
+            model.infer(
+                tokenizer,
+                prompt=config['prompt'],
+                image_file=temp_image_path,
+                output_path=item_dir,
+                base_size=base_size,
+                image_size=image_size,
+                crop_mode=crop_mode,
+                save_results=True,
+                test_compress=True
+            )
+
+            result_filepath = os.path.join(item_dir, config['output_file'])
+            text = None
+            if os.path.exists(result_filepath):
+                with open(result_filepath, 'r', encoding='utf-8') as f:
+                    text = f.read()
+            else:
+                for filename in os.listdir(item_dir):
+                    if filename.endswith(('.txt', '.mmd', '.md')):
+                        with open(os.path.join(item_dir, filename), 'r', encoding='utf-8') as f:
+                            text = f.read()
+                        break
+
+            boxes_image_rel = None
+            boxes_image_path = os.path.join(item_dir, 'result_with_boxes.jpg')
+            if os.path.exists(boxes_image_path):
+                boxes_image_rel = f'batch_{idx+1}/result_with_boxes.jpg'
+
+            batch_results.append({
+                'index': idx + 1,
+                'text': text or '',
+                'boxes_image_path': boxes_image_rel
+            })
+
+            if os.path.exists(temp_image_path):
+                os.remove(temp_image_path)
+
+        update_progress('idle', '', '', 0, 0)
+
+        combined_text = '\n\n'.join([item['text'] for item in batch_results])
+        return jsonify({'status': 'success', 'prompt_type': prompt_type, 'items': batch_results, 'combined_text': combined_text})
+
+    except Exception as e:
+        logger.error(f"Error during batch OCR: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+@app.route('/tts', methods=['POST'])
+def text_to_speech():
+    """Convert text to speech using Edge TTS (CPU) or Coqui XTTS (GPU)"""
+    try:
+        data = request.get_json(silent=True) or {}
+        text = data.get('text', '')
+        language = data.get('language')  # Auto-detect if None
+        tts_engine = data.get('tts_engine', 'edge_tts')
+        
+        if not text:
+            return jsonify({'status': 'error', 'message': 'No text provided'}), 400
+        
+        # Generate unique output filename
+        import uuid
+        audio_filename = f"tts_output_{uuid.uuid4().hex}.mp3"
+        audio_path = os.path.join(OUTPUT_DIR, audio_filename)
+        os.makedirs(OUTPUT_DIR, exist_ok=True)
+        
+        if tts_engine == 'coqui_xtts':
+            if not COQUI_AVAILABLE:
+                return jsonify({
+                    'status': 'error',
+                    'message': 'Coqui XTTS not available. Please use Edge TTS or install: pip install TTS'
+                }), 500
+            result = coqui_tts_generate(text, audio_path, language)
+        else:
+            # Default to Edge TTS (CPU)
+            if not EDGE_TTS_AVAILABLE:
+                return jsonify({
+                    'status': 'error',
+                    'message': 'Edge TTS not available. Install: pip install edge-tts'
+                }), 500
+            # Run async function
+            import asyncio
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            result = loop.run_until_complete(edge_tts_generate(text, audio_path, language))
+            loop.close()
+        
+        if result['status'] == 'success':
+            return jsonify({
+                'status': 'success',
+                'audio_url': f'/outputs/{audio_filename}',
+                'engine': result.get('engine'),
+                'language': result.get('language')
+            })
+        else:
+            return jsonify(result), 500
+            
+    except Exception as e:
+        logger.error(f"TTS error: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+@app.route('/tts_status', methods=['GET'])
+def get_tts_status():
+    """Check available TTS engines"""
+    return jsonify(check_tts_availability())
 
 if __name__ == '__main__':
     # Load model on startup

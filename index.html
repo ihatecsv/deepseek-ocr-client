@@ -1,5 +1,6 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -8,6 +9,7 @@
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
 </head>
+
 <body>
     <div class="container">
         <header>
@@ -32,11 +34,14 @@
                     <div class="header-links">
                         <a href="https://huggingface.co/deepseek-ai/DeepSeek-OCR" target="_blank">Model HuggingFace</a>
                         <span class="link-divider">•</span>
-                        <a href="https://deepseek.ai/blog/deepseek-ocr-context-compression" target="_blank">Model Blog Post</a>
+                        <a href="https://deepseek.ai/blog/deepseek-ocr-context-compression" target="_blank">Model Blog
+                            Post</a>
                         <span class="link-divider">•</span>
                         <a href="https://github.com/deepseek-ai/DeepSeek-OCR" target="_blank">Model GitHub</a>
                         <span class="link-divider">•</span>
                         <a href="https://github.com/ihatecsv/deepseek-ocr-client" target="_blank">Client GitHub</a>
+                        <span class="link-divider">•</span>
+                        <button id="check-updates-btn" class="btn btn-compact">Check Updates</button>
                     </div>
                 </div>
 
@@ -45,6 +50,11 @@
                 <div class="header-right">
                     <div class="controls-section">
                         <div class="controls-grid">
+                            <div class="form-group">
+                                <label for="server-url">Server:</label>
+                                <input type="text" id="server-url" placeholder="http://127.0.0.1:5000"
+                                    value="http://127.0.0.1:5000" />
+                            </div>
                             <div class="form-group">
                                 <label for="prompt-type">Type:</label>
                                 <select id="prompt-type">
@@ -82,11 +92,22 @@
                                     Crop
                                 </label>
                             </div>
+
+                            <div class="form-group">
+                                <label for="ocr-engine">Engine:</label>
+                                <select id="ocr-engine">
+                                    <option value="tesseract">Tesseract (CPU)</option>
+                                    <option value="deepseek">DeepSeek (GPU)</option>
+                                </select>
+                            </div>
                         </div>
 
                         <div class="controls-buttons">
                             <button id="ocr-btn" class="btn btn-primary" disabled>
                                 <span id="ocr-btn-text">Run OCR</span>
+                            </button>
+                            <button id="pdf-ocr-btn" class="btn btn-secondary">
+                                OCR PDF
                             </button>
                             <button id="load-model-btn" class="btn btn-secondary">
                                 Load Model
@@ -98,10 +119,13 @@
 
                     <div class="upload-section">
                         <div id="drop-zone" class="drop-zone">
-                            <svg class="upload-icon" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
+                            <svg class="upload-icon" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"
+                                stroke="currentColor">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                    d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
                             </svg>
-                            <p class="upload-text">Drop image or click</p>
+                            <p class="upload-text">Drop image(s) or click</p>
+                            <p class="upload-hint">Multiple files = batch OCR</p>
                             <button id="select-btn" class="btn btn-primary btn-compact">Select</button>
                         </div>
 
@@ -126,10 +150,28 @@
                             </div>
                         </div>
                         <div class="results-buttons">
-                            <button id="view-boxes-btn" class="btn btn-small" style="display: none;">View Boxes Image</button>
-                            <button id="view-tokens-btn" class="btn btn-small" style="display: none;">View Raw Tokens</button>
-                            <button id="copy-btn" class="btn btn-small" style="display: none;">Copy to Clipboard</button>
-                            <button id="download-zip-btn" class="btn btn-small" style="display: none;">Download ZIP</button>
+                            <div class="tts-controls" style="display: none;" id="tts-controls">
+                                <select id="tts-engine" class="select-small" title="TTS Engine">
+                                    <option value="edge_tts">Edge TTS (CPU)</option>
+                                    <option value="coqui_xtts">Coqui XTTS (GPU)</option>
+                                </select>
+                                <button id="read-aloud-btn" class="btn btn-small" title="Read Aloud">
+                                    🔊 Read
+                                </button>
+                                <button id="stop-read-btn" class="btn btn-small" title="Stop Reading"
+                                    style="display: none;">
+                                    ⏹ Stop
+                                </button>
+                                <audio id="tts-audio" style="display: none;"></audio>
+                            </div>
+                            <button id="view-boxes-btn" class="btn btn-small" style="display: none;">View Boxes
+                                Image</button>
+                            <button id="view-tokens-btn" class="btn btn-small" style="display: none;">View Raw
+                                Tokens</button>
+                            <button id="copy-btn" class="btn btn-small" style="display: none;">Copy to
+                                Clipboard</button>
+                            <button id="download-zip-btn" class="btn btn-small" style="display: none;">Download
+                                ZIP</button>
                         </div>
                     </div>
 
@@ -159,8 +201,8 @@
                     </div>
                 </div>
             </div>
-        </div>
-        </main>
+    </div>
+    </main>
     </div>
 
     <!-- Lightbox -->
@@ -174,4 +216,5 @@
 
     <script src="renderer.js"></script>
 </body>
+
 </html>

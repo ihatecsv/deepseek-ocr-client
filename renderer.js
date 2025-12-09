@@ -9,6 +9,7 @@ const viewTokensBtn = document.getElementById('view-tokens-btn');
 const downloadZipBtn = document.getElementById('download-zip-btn');
 const ocrBtn = document.getElementById('ocr-btn');
 const ocrBtnText = document.getElementById('ocr-btn-text');
+const pdfOcrBtn = document.getElementById('pdf-ocr-btn');
 const loadModelBtn = document.getElementById('load-model-btn');
 const copyBtn = document.getElementById('copy-btn');
 const previewSection = document.getElementById('preview-section');
@@ -18,6 +19,15 @@ const ocrPreviewImage = document.getElementById('ocr-preview-image');
 const ocrBoxesOverlay = document.getElementById('ocr-boxes-overlay');
 const progressInline = document.getElementById('progress-inline');
 const progressStatus = document.getElementById('progress-status');
+const serverUrlInput = document.getElementById('server-url');
+const checkUpdatesBtn = document.getElementById('check-updates-btn');
+
+// TTS elements
+const ttsControls = document.getElementById('tts-controls');
+const ttsEngineSelect = document.getElementById('tts-engine');
+const readAloudBtn = document.getElementById('read-aloud-btn');
+const stopReadBtn = document.getElementById('stop-read-btn');
+const ttsAudio = document.getElementById('tts-audio');
 
 // Lightbox elements
 const lightbox = document.getElementById('lightbox');
@@ -35,6 +45,7 @@ const promptType = document.getElementById('prompt-type');
 const baseSize = document.getElementById('base-size');
 const imageSize = document.getElementById('image-size');
 const cropMode = document.getElementById('crop-mode');
+const ocrEngine = document.getElementById('ocr-engine');
 
 // Constants
 const DEEPSEEK_COORD_MAX = 999;
@@ -71,8 +82,18 @@ window.addEventListener('DOMContentLoaded', () => {
         });
     }
 
+    // Preload speech synthesis voices (they load asynchronously)
+    if ('speechSynthesis' in window) {
+        speechSynthesis.getVoices();
+        speechSynthesis.onvoiceschanged = () => {
+            const voices = speechSynthesis.getVoices();
+            console.log('Speech synthesis voices loaded:', voices.length);
+        };
+    }
+
     checkServerStatus();
     setupEventListeners();
+    setupTTS();
     setInterval(checkServerStatus, 5000);
 });
 
@@ -100,24 +121,31 @@ function setupEventListeners() {
         e.preventDefault();
         dropZone.style.background = '#f8f9ff';
     });
-
-    dropZone.addEventListener('drop', (e) => {
+    dropZone.addEventListener('drop', async (e) => {
         e.preventDefault();
         dropZone.style.background = '#f8f9ff';
 
-        const files = e.dataTransfer.files;
-        if (files.length > 0) {
-            const file = files[0];
-            if (file.type.startsWith('image/')) {
-                loadImage(file.path);
-            } else {
-                showMessage('Please drop an image file', 'error');
-            }
+        const files = Array.from(e.dataTransfer.files).filter(f => f.type.startsWith('image/'));
+
+        if (files.length === 0) {
+            showMessage('Please drop image file(s)', 'error');
+            return;
+        }
+
+        if (files.length === 1) {
+            // Single file - auto OCR
+            await loadImage(files[0].path);
+            performOCR();
+        } else {
+            // Multiple files - batch OCR
+            const filePaths = files.map(f => f.path);
+            await performBatchOCRWithPaths(filePaths);
         }
     });
 
     // OCR
     ocrBtn.addEventListener('click', performOCR);
+    pdfOcrBtn.addEventListener('click', performPDFOCR);
 
     // Load model
     loadModelBtn.addEventListener('click', loadModel);
@@ -135,11 +163,33 @@ function setupEventListeners() {
             closeLightbox();
         }
     });
+
+    // Server URL persistence
+    const savedUrl = localStorage.getItem('serverUrl');
+    if (savedUrl) {
+        serverUrlInput.value = savedUrl;
+    }
+    serverUrlInput.addEventListener('change', () => {
+        localStorage.setItem('serverUrl', serverUrlInput.value.trim());
+        checkServerStatus();
+    });
+
+    checkUpdatesBtn.addEventListener('click', checkForUpdates);
+
+    // Engine selection
+    ocrEngine.addEventListener('change', () => {
+        checkServerStatus();
+    });
+}
+
+function getServerUrl() {
+    const url = (serverUrlInput && serverUrlInput.value) ? serverUrlInput.value.trim() : 'http://127.0.0.1:5000';
+    return url.endsWith('/') ? url.slice(0, -1) : url;
 }
 
 async function checkServerStatus() {
     try {
-        const result = await ipcRenderer.invoke('check-server-status');
+        const result = await ipcRenderer.invoke('check-server-status', { serverUrl: getServerUrl() });
 
         if (result.success) {
             serverStatus.textContent = 'Connected';
@@ -150,8 +200,18 @@ async function checkServerStatus() {
             modelStatus.className = `status-value ${modelLoaded ? 'success' : 'warning'}`;
 
             const gpuAvailable = result.data.gpu_available;
-            gpuStatus.textContent = gpuAvailable ? 'Available' : 'CPU Only';
-            gpuStatus.className = `status-value ${gpuAvailable ? 'success' : 'warning'}`;
+            const tesseractAvailable = result.data.tesseract_available;
+            const deepseekAvailable = result.data.deepseek_available;
+            const currentEngine = ocrEngine ? ocrEngine.value : 'tesseract';
+
+            // Update GPU status based on engine
+            if (currentEngine === 'tesseract') {
+                gpuStatus.textContent = tesseractAvailable ? 'Tesseract OK' : 'Tesseract Missing';
+                gpuStatus.className = `status-value ${tesseractAvailable ? 'success' : 'error'}`;
+            } else {
+                gpuStatus.textContent = gpuAvailable ? 'GPU Available' : 'No GPU';
+                gpuStatus.className = `status-value ${gpuAvailable ? 'success' : 'error'}`;
+            }
 
             // Update load model button state (but don't change if currently processing)
             if (!isProcessing) {
@@ -191,10 +251,17 @@ async function checkServerStatus() {
 }
 
 async function selectImage() {
-    const result = await ipcRenderer.invoke('select-image');
+    const result = await ipcRenderer.invoke('select-images');
 
-    if (result.success) {
-        loadImage(result.filePath);
+    if (result.success && result.filePaths && result.filePaths.length > 0) {
+        if (result.filePaths.length === 1) {
+            // Single file - auto OCR
+            await loadImage(result.filePaths[0]);
+            performOCR();
+        } else {
+            // Multiple files - batch OCR direct start
+            await performBatchOCRWithPaths(result.filePaths);
+        }
     }
 }
 
@@ -210,7 +277,9 @@ async function loadImage(filePath) {
     resultsContent.innerHTML = '';
     progressInline.style.display = 'none';
     copyBtn.style.display = 'none';
+    copyBtn.style.display = 'none';
     downloadZipBtn.style.display = 'none';
+    if (ttsControls) ttsControls.style.display = 'none';
     viewBoxesBtn.style.display = 'none';
     viewTokensBtn.style.display = 'none';
 
@@ -607,22 +676,28 @@ async function loadModel() {
         loadModelBtn.disabled = true;
         loadModelBtn.textContent = 'Loading Model...';
 
-        // Show inline progress indicator
-        progressInline.style.display = 'flex';
-        progressStatus.textContent = 'Loading model...';
+        const modelProgress = document.getElementById('model-progress');
+        const progressBar = document.getElementById('progress-bar');
+        const progressStage = document.getElementById('progress-stage');
+        const progressPercent = document.getElementById('progress-percent');
+        modelProgress.style.display = 'block';
 
         // Start polling for progress updates
         const pollProgress = async () => {
             try {
-                const response = await fetch('http://127.0.0.1:5000/progress');
+                const response = await fetch(`${getServerUrl()}/progress`);
                 const data = await response.json();
                 console.log('Progress update:', data);
 
                 if (data.status === 'loading') {
-                    const percent = data.progress_percent || 0;
-                    progressStatus.textContent = `Loading ${percent}% - ${data.stage || ''}`;
+                    const percent = Math.max(0, Math.min(100, data.progress_percent || 0));
+                    progressBar.style.width = `${percent}%`;
+                    progressStage.textContent = data.stage || '';
+                    progressPercent.textContent = `${percent}%`;
                 } else if (data.status === 'loaded') {
-                    progressStatus.textContent = 'Model loaded successfully!';
+                    progressBar.style.width = '100%';
+                    progressStage.textContent = 'complete';
+                    progressPercent.textContent = '100%';
 
                     // Stop polling when done
                     if (pollInterval) {
@@ -630,7 +705,7 @@ async function loadModel() {
                         pollInterval = null;
                     }
                 } else if (data.status === 'error') {
-                    progressStatus.textContent = 'Error loading model';
+                    progressStage.textContent = 'error';
 
                     // Stop polling on error
                     if (pollInterval) {
@@ -643,17 +718,18 @@ async function loadModel() {
             }
         };
 
-        // Poll every 500ms
+        // Poll every 400ms
         pollInterval = setInterval(pollProgress, 500);
 
         // Trigger model loading
-        const result = await ipcRenderer.invoke('load-model');
+        const currentEngine = ocrEngine ? ocrEngine.value : 'tesseract';
+        const result = await ipcRenderer.invoke('load-model', { serverUrl: getServerUrl(), ocr_engine: currentEngine });
 
         // Wait for final status
         await new Promise(resolve => {
             const checkStatus = setInterval(async () => {
                 try {
-                    const response = await fetch('http://127.0.0.1:5000/progress');
+                    const response = await fetch(`${getServerUrl()}/progress`);
                     const data = await response.json();
 
                     if (data.status === 'loaded' || data.status === 'error') {
@@ -670,8 +746,7 @@ async function loadModel() {
             }, 500);
         });
 
-        // Hide progress indicator
-        progressInline.style.display = 'none';
+        modelProgress.style.display = 'none';
 
         if (result.success) {
             showMessage('Model loaded successfully!', 'success');
@@ -738,7 +813,7 @@ async function performOCR() {
         // Poll for token count and raw token stream updates
         tokenPollInterval = setInterval(async () => {
             try {
-                const response = await fetch('http://127.0.0.1:5000/progress');
+                const response = await fetch(`${getServerUrl()}/progress`);
                 const data = await response.json();
 
                 if (data.status === 'processing') {
@@ -777,7 +852,8 @@ async function performOCR() {
             promptType: promptType.value,
             baseSize: parseInt(baseSize.value),
             imageSize: parseInt(imageSize.value),
-            cropMode: cropMode.checked
+            cropMode: cropMode.checked,
+            serverUrl: getServerUrl()
         });
 
         // Stop polling
@@ -901,13 +977,25 @@ function displayResults(result, promptType) {
         const cacheBuster = Date.now();
         const renderedMarkdown = formattedResult.replace(
             /!\[([^\]]*)\]\(images\/([^)]+)\)/g,
-            `![$1](http://127.0.0.1:5000/outputs/images/$2?t=${cacheBuster})`
+            `![$1](${getServerUrl()}/outputs/images/$2?t=${cacheBuster})`
         );
         resultsContent.innerHTML = marked.parse(renderedMarkdown);
     } else {
         resultsContent.textContent = formattedResult;
     }
+
+    // Show TTS controls
+    if (formattedResult && ttsControls) {
+        console.log('Showing TTS controls');
+        ttsControls.style.display = 'flex';
+        readAloudBtn.style.display = 'inline-block';
+        stopReadBtn.style.display = 'none';
+        if (speechSynthesis.speaking) speechSynthesis.cancel();
+
+    }
 }
+
+
 
 function copyResults() {
     // Use the original text (markdown) instead of rendered HTML
@@ -955,7 +1043,7 @@ async function downloadZip() {
         const imagesFolder = zip.folder('images');
         const imagePromises = Array.from(imageFiles).map(async (filename) => {
             try {
-                const response = await fetch(`http://127.0.0.1:5000/outputs/images/${filename}`);
+                const response = await fetch(`${getServerUrl()}/outputs/images/${filename}`);
                 if (response.ok) {
                     const blob = await response.blob();
                     imagesFolder.file(filename, blob);
@@ -1003,5 +1091,390 @@ function showMessage(message, type = 'info') {
     console.log(`[${type.toUpperCase()}] ${message}`);
     if (resultsContent.textContent.includes('OCR results will appear here')) {
         resultsContent.innerHTML = `<p class="${type}">${message}</p>`;
+    }
+}
+async function performPDFOCR() {
+    if (isProcessing) return;
+
+    try {
+        isProcessing = true;
+        pdfOcrBtn.disabled = true;
+        progressInline.style.display = 'flex';
+        progressStatus.textContent = 'Selecting PDF...';
+
+        const sel = await ipcRenderer.invoke('select-pdf');
+        if (!sel.success) {
+            progressInline.style.display = 'none';
+            pdfOcrBtn.disabled = false;
+            return;
+        }
+
+        progressStatus.textContent = 'Processing PDF...';
+
+        const result = await ipcRenderer.invoke('perform-ocr-pdf', {
+            pdfPath: sel.filePath,
+            promptType: promptType.value,
+            baseSize: parseInt(baseSize.value),
+            imageSize: parseInt(imageSize.value),
+            cropMode: cropMode.checked,
+            serverUrl: getServerUrl()
+        });
+
+        progressInline.style.display = 'none';
+
+        if (result.success) {
+            currentPromptType = result.data.prompt_type;
+            const combinedText = result.data.combined_text || '';
+            displayResults(combinedText, currentPromptType);
+            copyBtn.style.display = 'inline-block';
+            downloadZipBtn.style.display = currentPromptType === 'document' ? 'inline-block' : 'none';
+            showMessage('PDF OCR completed successfully', 'success');
+        } else {
+            resultsContent.innerHTML = `<p class="error">Error: ${result.error}</p>`;
+            copyBtn.style.display = 'none';
+            downloadZipBtn.style.display = 'none';
+            showMessage(`PDF OCR failed: ${result.error}`, 'error');
+        }
+    } catch (error) {
+        progressInline.style.display = 'none';
+        resultsContent.innerHTML = `<p class="error">Error: ${error.message}</p>`;
+        copyBtn.style.display = 'none';
+        downloadZipBtn.style.display = 'none';
+        showMessage(`Error: ${error.message}`, 'error');
+    } finally {
+        isProcessing = false;
+        pdfOcrBtn.disabled = false;
+    }
+}
+async function performBatchOCRWithPaths(imagePaths) {
+    if (isProcessing) return;
+    if (!imagePaths || imagePaths.length === 0) return;
+
+    try {
+        isProcessing = true;
+        progressInline.style.display = 'flex';
+        progressStatus.textContent = `Processing ${imagePaths.length} images...`;
+
+        // Clear previous results
+        resultsContent.innerHTML = '';
+        ocrPreviewImage.src = '';
+        ocrBoxesOverlay.innerHTML = '';
+        ocrBoxesOverlay.removeAttribute('viewBox');
+        lastBoxCount = 0;
+        copyBtn.style.display = 'none';
+        downloadZipBtn.style.display = 'none';
+        viewBoxesBtn.style.display = 'none';
+        viewTokensBtn.style.display = 'none';
+
+        // Hide drop zone, show preview section with batch info
+        dropZone.style.display = 'none';
+        previewSection.style.display = 'block';
+        imagePreview.src = imagePaths[0]; // Show first image as preview
+
+        const currentEngine = ocrEngine ? ocrEngine.value : 'tesseract';
+
+        const result = await ipcRenderer.invoke('perform-ocr-batch', {
+            imagePaths: imagePaths,
+            promptType: promptType.value,
+            baseSize: parseInt(baseSize.value),
+            imageSize: parseInt(imageSize.value),
+            cropMode: cropMode.checked,
+            serverUrl: getServerUrl(),
+            ocr_engine: currentEngine
+        });
+
+        progressInline.style.display = 'none';
+
+        if (result.success) {
+            currentPromptType = result.data.prompt_type;
+            const combinedText = result.data.combined_text || '';
+            displayResults(combinedText, currentPromptType);
+            copyBtn.style.display = 'inline-block';
+            downloadZipBtn.style.display = currentPromptType === 'document' ? 'inline-block' : 'none';
+            showMessage(`Batch OCR completed - ${imagePaths.length} images processed`, 'success');
+        } else {
+            resultsContent.innerHTML = `<p class="error">Error: ${result.error}</p>`;
+            copyBtn.style.display = 'none';
+            downloadZipBtn.style.display = 'none';
+            showMessage(`Batch OCR failed: ${result.error}`, 'error');
+        }
+    } catch (error) {
+        progressInline.style.display = 'none';
+        resultsContent.innerHTML = `<p class="error">Error: ${error.message}</p>`;
+        copyBtn.style.display = 'none';
+        downloadZipBtn.style.display = 'none';
+        showMessage(`Error: ${error.message}`, 'error');
+    } finally {
+        isProcessing = false;
+    }
+}
+async function checkForUpdates() {
+    try {
+        const result = await ipcRenderer.invoke('check-updates');
+        if (result.success) {
+            const d = result.data;
+            if (d.hasUpdate) {
+                showMessage(`Update available: ${d.latestTag}`, 'success');
+            } else {
+                showMessage('You are up to date', 'info');
+            }
+        } else {
+            showMessage(`Update check failed: ${result.error}`, 'error');
+        }
+    } catch (e) {
+        showMessage(`Update check error: ${e.message}`, 'error');
+    }
+}
+
+function setupTTS() {
+    function cleanTextForTTS(text) {
+        if (!text) return '';
+        return text
+            .replace(/!\[.*?\]\(.*?\)/g, '')
+            .replace(/\[([^\]]+)\]\(.*?\)/g, '$1')
+            .replace(/^#+\s/gm, '')
+            .replace(/(\*\*|__)(.*?)\1/g, '$2')
+            .replace(/(\*|_)(.*?)\1/g, '$2')
+            .replace(/`{3}[\s\S]*?`{3}/g, '')
+            .replace(/`(.+?)`/g, '$1')
+            .replace(/^>\s/gm, '')
+            .replace(/^-{3,}$/gm, '')
+            .replace(/\.\.\./g, '.')
+            .replace(/\.\s*\./g, '.')
+            .replace(/\s+/g, ' ')
+            .trim();
+    }
+
+    let isReading = false;
+
+    if (readAloudBtn) {
+        console.log('TTS: Listener attaching');
+        readAloudBtn.removeEventListener('click', null); // dummy remove
+
+        readAloudBtn.addEventListener('click', async () => {
+            // DEBUG: Alert to confirm click is registered
+            // alert('Read button clicked!'); 
+
+            if (isReading) {
+                // showMessage('Already reading...', 'info');
+                console.warn('TTS: Already reading');
+                return;
+            }
+
+            let textToRead = currentResultText;
+            if (!textToRead && resultsContent) {
+                textToRead = resultsContent.innerText;
+            }
+
+            if (!textToRead) {
+                alert('No text found to read! Please perform OCR first.');
+                return;
+            }
+
+            textToRead = cleanTextForTTS(textToRead);
+
+            if (!textToRead) {
+                alert('Text is empty after cleaning.');
+                return;
+            }
+
+            isReading = true;
+            readAloudBtn.style.display = 'none';
+            stopReadBtn.style.display = 'inline-block';
+            showMessage('Generating audio...', 'info');
+
+            try {
+                const ttsEngine = ttsEngineSelect ? ttsEngineSelect.value : 'edge_tts';
+                console.log('TTS: Engine:', ttsEngine);
+
+                const response = await fetch(`${getServerUrl()}/tts`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        text: textToRead,
+                        tts_engine: ttsEngine
+                    })
+                });
+
+                const result = await response.json();
+                console.log('TTS Result:', result);
+
+                if (result.status === 'success' && result.audio_url) {
+                    showMessage('Playing audio...', 'success');
+                    if (ttsAudio) {
+                        ttsAudio.src = `${getServerUrl()}${result.audio_url}`;
+                        ttsAudio.onended = () => {
+                            isReading = false;
+                            readAloudBtn.style.display = 'inline-block';
+                            stopReadBtn.style.display = 'none';
+                            showMessage('Finished reading', 'success');
+                        };
+                        ttsAudio.onerror = (e) => {
+                            console.error('Audio playback failed, trying browser TTS...');
+                            useBrowserTTS(textToRead, isReading, readAloudBtn, stopReadBtn);
+                        };
+                        try {
+                            await ttsAudio.play();
+                        } catch (playError) {
+                            console.error('Play error, trying browser TTS:', playError);
+                            useBrowserTTS(textToRead, isReading, readAloudBtn, stopReadBtn);
+                        }
+                    }
+                } else {
+                    // Backend TTS failed, use browser Speech API as fallback
+                    console.log('Backend TTS failed, using browser Speech API...');
+                    showMessage('Using browser TTS...', 'info');
+                    useBrowserTTS(textToRead, isReading, readAloudBtn, stopReadBtn);
+                }
+            } catch (error) {
+                console.error('TTS Network Error, using browser TTS:', error);
+                showMessage('Using browser TTS...', 'info');
+                useBrowserTTS(textToRead, isReading, readAloudBtn, stopReadBtn);
+            }
+
+            // Browser TTS fallback function
+            function useBrowserTTS(text, isReadingRef, readBtn, stopBtn) {
+                console.log('Using browser TTS fallback...');
+
+                if (!('speechSynthesis' in window)) {
+                    alert('Your browser does not support text-to-speech.');
+                    isReading = false;
+                    readAloudBtn.style.display = 'inline-block';
+                    stopReadBtn.style.display = 'none';
+                    return;
+                }
+
+                // Get voices - may need to wait for them to load
+                let voices = speechSynthesis.getVoices();
+                if (voices.length === 0) {
+                    // Voices not loaded yet, try again after a delay
+                    setTimeout(() => {
+                        voices = speechSynthesis.getVoices();
+                        startBrowserSpeech(text, voices);
+                    }, 200);
+                } else {
+                    startBrowserSpeech(text, voices);
+                }
+
+                function startBrowserSpeech(textToSpeak, availableVoices) {
+                    console.log('Available voices:', availableVoices.length);
+                    availableVoices.forEach((v, i) => console.log(`  ${i}: ${v.name} (${v.lang})`));
+
+                    // Cancel any ongoing speech
+                    speechSynthesis.cancel();
+
+                    const utterance = new SpeechSynthesisUtterance(text);
+
+                    // Detect language from text content
+                    function detectLanguage(text) {
+                        if (!text) return 'en';
+
+                        const len = text.length;
+
+                        // Count character types
+                        const arabicChars = (text.match(/[\u0600-\u06FF]/g) || []).length;
+                        const chineseChars = (text.match(/[\u4e00-\u9fff]/g) || []).length;
+                        const japaneseChars = (text.match(/[\u3040-\u30ff]/g) || []).length;
+                        const koreanChars = (text.match(/[\uac00-\ud7af]/g) || []).length;
+                        const cyrillicChars = (text.match(/[\u0400-\u04FF]/g) || []).length;
+
+                        // French-specific characters and common words
+                        const frenchPattern = /[àâäéèêëïîôùûüÿœæç]|(\b(le|la|les|de|du|des|et|en|un|une|est|que|qui|dans|pour|sur|avec|ce|cette|sont|ont|pas|mais|aussi|plus|tout|comme|elle|il|nous|vous|ils|elles|leur|très|bien|fait|peut|être|avoir|faire|voir|dire|tous|aller|venir|prendre|donner|même|autre|grand|petit|nouveau|premier|dernier|jeune|vieux|beau|bon|mauvais|français|france)\b)/gi;
+                        const frenchMatches = text.match(frenchPattern) || [];
+                        const frenchScore = frenchMatches.length;
+
+                        // German-specific characters and common words
+                        const germanPattern = /[äöüßÄÖÜ]|(\b(der|die|das|und|ist|ein|eine|für|mit|auf|nicht|ich|sie|wir|ihr|es|von|zu|den|dem|sich|als|auch|nach|bei|aus|wenn|noch|werden|haben|sein|werden|kann|so|mehr|sehr|nur|dann|aber|über|vor|können|schon|wieder|gegen|unter|zwischen)\b)/gi;
+                        const germanMatches = text.match(germanPattern) || [];
+                        const germanScore = germanMatches.length;
+
+                        // Spanish-specific characters and common words
+                        const spanishPattern = /[áéíóúñü¿¡]|(\b(el|la|los|las|de|del|en|un|una|es|que|y|por|con|para|se|como|más|su|pero|este|esta|son|sus|al|le|lo|me|ya|muy|sin|sobre|todo|también|bien|puede|donde|cuando|hace|tiene|tengo|hay|entre|así|porque|antes|después|cada|desde|hasta|durante|mediante|según|ser|estar|tener|hacer|poder|decir|ir|ver|dar|saber|querer|llegar|pasar|deber|poner|parecer|quedar|creer|hablar|llevar|dejar|seguir|encontrar|llamar|venir|pensar|salir|volver|tomar|conocer|vivir|sentir|tratar|mirar|contar|empezar|esperar|buscar|existir|entrar|trabajar|escribir|perder|producir|ocurrir|entender|pedir|recibir|recordar|terminar|permitir|aparecer|conseguir|comenzar|servir|sacar|necesitar|mantener|resultar|leer|caer|cambiar|presentar|crear|abrir|considerar|oír|acabar|convertir|ganar|formar|traer|partir|morir|aceptar|realizar|suponer|comprender|lograr|explicar|preguntar|tocar|reconocer|estudiar|alcanzar|nacer|dirigir|correr|utilizar|pagar|ayudar|gustar|jugar|escuchar|cumplir|ofrecer|descubrir|levantar|intentar)\b)/gi;
+                        const spanishMatches = text.match(spanishPattern) || [];
+                        const spanishScore = spanishMatches.length;
+
+                        const threshold = 0.1;
+
+                        if (arabicChars / len > threshold) return 'ar';
+                        if (chineseChars / len > threshold) return 'zh';
+                        if (japaneseChars / len > threshold) return 'ja';
+                        if (koreanChars / len > threshold) return 'ko';
+                        if (cyrillicChars / len > threshold) return 'ru';
+
+                        // Check word-based scoring for Latin languages
+                        const wordCount = text.split(/\s+/).length;
+                        if (frenchScore > wordCount * 0.1) return 'fr';
+                        if (germanScore > wordCount * 0.1) return 'de';
+                        if (spanishScore > wordCount * 0.1) return 'es';
+
+                        return 'en'; // Default to English
+                    }
+
+                    // Get available voices and find best match
+                    const voices = speechSynthesis.getVoices();
+                    const detectedLang = detectLanguage(text);
+                    console.log('Detected language:', detectedLang);
+
+                    // Find voice for detected language
+                    const matchingVoice = availableVoices.find(v => v.lang.startsWith(detectedLang));
+                    const englishVoice = availableVoices.find(v => v.lang.startsWith('en'));
+                    const frenchVoice = availableVoices.find(v => v.lang.startsWith('fr'));
+                    const arabicVoice = availableVoices.find(v => v.lang.startsWith('ar'));
+
+                    if (matchingVoice) {
+                        utterance.voice = matchingVoice;
+                        utterance.lang = detectedLang;
+                        console.log('Using voice:', matchingVoice.name, 'for language:', detectedLang);
+                        showMessage(`Using ${matchingVoice.name} for ${detectedLang}`, 'success');
+                    } else {
+                        // No voice for detected language
+                        const availableLangs = [...new Set(availableVoices.map(v => v.lang.split('-')[0]))];
+                        console.warn(`No voice found for ${detectedLang}. Available languages:`, availableLangs);
+
+                        if (detectedLang === 'ar' && !arabicVoice) {
+                            alert(`No Arabic voice installed on your system.\n\nTo add Arabic voice:\n1. Windows: Settings > Time & Language > Speech > Add voices\n2. Or install Arabic language pack\n\nWill read in English instead.`);
+                        } else if (detectedLang === 'fr' && !frenchVoice) {
+                            alert(`No French voice installed.\n\nWill read in English instead.`);
+                        }
+
+                        if (englishVoice) {
+                            utterance.voice = englishVoice;
+                            utterance.lang = 'en-US';
+                            console.log('Fallback to English voice');
+                            showMessage('Using English voice (no ' + detectedLang + ' voice available)', 'warning');
+                        }
+                    }
+
+                    utterance.onend = () => {
+                        isReading = false;
+                        readAloudBtn.style.display = 'inline-block';
+                        stopReadBtn.style.display = 'none';
+                        showMessage('Finished reading', 'success');
+                    };
+
+                    utterance.onerror = (e) => {
+                        console.error('Browser TTS error:', e);
+                        isReading = false;
+                        readAloudBtn.style.display = 'inline-block';
+                        stopReadBtn.style.display = 'none';
+                        showMessage('TTS error: ' + e.error, 'error');
+                    };
+
+                    speechSynthesis.speak(utterance);
+                }
+            }
+        });
+    }
+
+    if (stopReadBtn) {
+        stopReadBtn.addEventListener('click', () => {
+            if (ttsAudio) {
+                ttsAudio.pause();
+                ttsAudio.currentTime = 0;
+            }
+            isReading = false;
+            readAloudBtn.style.display = 'inline-block';
+            stopReadBtn.style.display = 'none';
+        });
     }
 }
