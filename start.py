@@ -144,7 +144,7 @@ def setup_python_environment():
 
     # Check if PyTorch is already installed
     pytorch_check = subprocess.run(
-        [str(python_path), "-c", "import torch; print(torch.__version__)"],
+        [str(python_path), "-c", "import torch; assert torch.__version__ == '2.9.1'"],
         capture_output=True,
         text=True,
         check=False
@@ -163,9 +163,9 @@ def setup_python_environment():
         elif cuda_version == "cu118":
             print("  Installing with CUDA 11.8 support (for older GPUs)...")
             index_url = "https://download.pytorch.org/whl/cu118"
-        else:  # cu124
-            print("  Installing with CUDA 12.4 support...")
-            index_url = "https://download.pytorch.org/whl/cu124"
+        else:  # cu130
+            print("  Installing with CUDA 13.0 support...")
+            index_url = "https://download.pytorch.org/whl/cu130"
 
         # Install PyTorch (with custom temp dir for downloads)
         env_with_temp = os.environ.copy()
@@ -177,7 +177,7 @@ def setup_python_environment():
 
         subprocess.run([
             str(pip_path), "install",
-            "torch==2.6.0", "torchvision==0.21.0", "torchaudio==2.6.0",
+            "torch==2.9.1", "torchvision==0.24.1", "torchaudio==2.9.1",
             "--index-url", index_url
         ], env=env_with_temp, check=True, shell=(sys.platform == "win32"))
         print("✓ PyTorch installed")
