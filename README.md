@@ -24,6 +24,8 @@ A real-time Electron-based desktop GUI for [DeepSeek-OCR](https://github.com/dee
 - Python 3.12+ ([download](https://www.python.org/))
 - NVIDIA GPU with CUDA, Apple Silicon (MPS), or CPU
 
+**Note:** MPS and CPU backends use [@Dogacel's modified model](https://huggingface.co/Dogacel/DeepSeek-OCR-Metal-MPS) instead of the [base model](https://huggingface.co/deepseek-ai/DeepSeek-OCR).
+
 ## Quick Start (Windows)
 
 1. **Extract** the [ZIP file](https://github.com/ihatecsv/deepseek-ocr-client/archive/refs/heads/main.zip)
