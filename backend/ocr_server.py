@@ -466,19 +466,33 @@ def perform_ocr():
         sys.stdout = char_stream
 
         try:
-            model.infer(
-                tokenizer,
-                device=torch.device(device),
-                dtype=dtype,
-                prompt=prompt,
-                image_file=temp_image_path,
-                output_path=OUTPUT_DIR,
-                base_size=base_size,
-                image_size=image_size,
-                crop_mode=crop_mode,
-                save_results=True,
-                test_compress=True,
-            )
+            if get_preferred_device() == "cuda":
+                model.infer(
+                    tokenizer,
+                    dtype=dtype,
+                    prompt=prompt,
+                    image_file=temp_image_path,
+                    output_path=OUTPUT_DIR,
+                    base_size=base_size,
+                    image_size=image_size,
+                    crop_mode=crop_mode,
+                    save_results=True,
+                    test_compress=True,
+                )
+            else:
+                model.infer(
+                    tokenizer,
+                    device=torch.device(device), # Only supported in MPS / CPU fork
+                    dtype=dtype,
+                    prompt=prompt,
+                    image_file=temp_image_path,
+                    output_path=OUTPUT_DIR,
+                    base_size=base_size,
+                    image_size=image_size,
+                    crop_mode=crop_mode,
+                    save_results=True,
+                    test_compress=True,
+                )
         finally:
             sys.stdout = old_stdout
             update_progress("idle", "", "", 0, 0)  # Reset progress
