@@ -469,7 +469,6 @@ def perform_ocr():
             if get_preferred_device() == "cuda":
                 model.infer(
                     tokenizer,
-                    dtype=dtype,
                     prompt=prompt,
                     image_file=temp_image_path,
                     output_path=OUTPUT_DIR,
@@ -483,7 +482,7 @@ def perform_ocr():
                 model.infer(
                     tokenizer,
                     device=torch.device(device), # Only supported in MPS / CPU fork
-                    dtype=dtype,
+                    dtype=dtype, # Only supported in MPS / CPU fork
                     prompt=prompt,
                     image_file=temp_image_path,
                     output_path=OUTPUT_DIR,
