@@ -13,7 +13,7 @@ A real-time Electron-based desktop GUI for [DeepSeek-OCR](https://github.com/dee
 
 - Click regions to copy 
 - Export results as ZIP with markdown images
-- GPU acceleration (CUDA)
+- GPU acceleration (CUDA, MPS) or CPU fallback
 
 <img src="docs/images/document2.png" width="1000">
 
@@ -22,7 +22,7 @@ A real-time Electron-based desktop GUI for [DeepSeek-OCR](https://github.com/dee
 - Windows 10/11, other OS are experimental
 - Node.js 18+ ([download](https://nodejs.org/))
 - Python 3.12+ ([download](https://www.python.org/))
-- NVIDIA GPU with CUDA
+- NVIDIA GPU with CUDA, Apple Silicon (MPS), or CPU
 
 ## Quick Start (Windows)
 
@@ -39,9 +39,7 @@ Note: if you have issues processing images but the model loads properly, please 
 
 ## Linux/macOS
 
-**Note:** Linux and macOS have not been tested yet. Use `start-client.sh` instead of `start-client.bat`.
-
-**PRs welcome!** If you test on Linux/macOS and encounter issues, please open a pull request with fixes.
+Please follow Windows instructions but start with `start-client.sh` instead of `start-client.bat`.
 
 ## Links
 
@@ -56,7 +54,7 @@ Note: if you have issues processing images but the model loads properly, please 
 - [ ] Updater from GitHub releases
 - [ ] PDF support
 - [ ] Batch processing
-- [ ] CPU support?
+- [x] CPU/MPS support (thanks [@Dogacel](https://github.com/Dogacel)!)
 - [ ] Web version (so you can run the server on a different machine)
 - [ ] Better progress bar algo
 - [ ] ???
@@ -64,3 +62,4 @@ Note: if you have issues processing images but the model loads properly, please 
 ## License
 
 MIT
+ 
